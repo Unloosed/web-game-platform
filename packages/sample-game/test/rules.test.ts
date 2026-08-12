@@ -1,0 +1,2 @@
+import {describe,it,expect} from 'vitest'; import {addPlayer,initialState,move,tick} from '../src/index.js';
+describe('tag rules',()=>{it('moves only in running phase',()=>{let s=addPlayer(initialState(),'a','A',false);s.phase='running';expect(move(s,'a','right',1).players.a.x).toBeGreaterThan(s.players.a.x)});it('completes timer',()=>{let s=initialState();s.phase='running';s.remainingMs=1;expect(tick(s,1).phase).toBe('completed')});});
