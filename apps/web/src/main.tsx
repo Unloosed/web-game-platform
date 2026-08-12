@@ -232,7 +232,13 @@ function Game({
     ),
     [text, setText] = useState(""),
     [spectator, setSpectator] = useState(room.role === "spectator"),
-    sock = useRef<Socket | null>(null);
+    sock = useRef<Socket | null>(null),
+    latestSnap = useRef<Snap | null>(null);
+
+  useEffect(() => {
+    latestSnap.current = snap;
+  }, [snap]);
+
   useEffect(() => {
     const s = io(GAME, {
       transports: ["websocket"],
@@ -258,12 +264,15 @@ function Game({
         ArrowRight: "right",
         d: "right",
       };
-      if (d[e.key])
-        s.emit("client_event", {
-          type: "input",
-          seq: Date.now(),
-          direction: d[e.key],
-        });
+      const direction = d[e.key];
+      if (!direction) return;
+      const current = latestSnap.current ?? snap;
+      if (current.phase !== "running" || spectator) return;
+      s.emit("client_event", {
+        type: "input",
+        seq: Date.now(),
+        direction,
+      });
     };
     window.addEventListener("keydown", key);
     return () => {
@@ -271,6 +280,17 @@ function Game({
       s.close();
     };
   }, [room.code, user.id, user.displayName, spectator]);
+
+  useEffect(() => {
+    void fetchApi(`/rooms/${room.code}/chat`)
+      .then((response) => {
+        setChat(response.messages as { from: string; text: string; at: number }[]);
+      })
+      .catch(() => {
+        // ignore chat history errors in UI; live chat still works
+      });
+  }, [room.code]);
+
   const mine = room.hostUserId === user.id;
   const secs = Math.ceil(snap.remainingMs / 1000);
   return (
@@ -291,10 +311,23 @@ function Game({
         Spectate only
       </label>
       {mine && snap.phase === "waiting" && (
-        <button onClick={() => sock.current?.emit("start_match")}>
+        <button type="button" onClick={() => sock.current?.emit("start_match")}>
           Start match
         </button>
       )}
+      {snap.phase === "completed" && mine && (
+        <button
+          type="button"
+          onClick={() => sock.current?.emit("restart_match")}
+        >
+          Play again
+        </button>
+      )}
+      <p data-testid="match-status">
+        {snap.phase === "waiting" && "Waiting for host to start"}
+        {snap.phase === "running" && `Time remaining: ${secs}s`}
+        {snap.phase === "completed" && "Match completed"}
+      </p>
       <p data-testid="timer">
         {snap.phase === "completed" ? "Match completed" : `Time: ${secs}s`}
       </p>
@@ -356,10 +389,16 @@ function Game({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (text.trim()) {
-            sock.current?.emit("client_event", { type: "chat", text });
-            setText("");
-          }
+          const trimmed = text.trim();
+          if (!trimmed) return;
+          sock.current?.emit("client_event", { type: "chat", text: trimmed });
+          void fetchApi(`/rooms/${room.code}/chat`, {
+            method: "POST",
+            body: JSON.stringify({ text: trimmed }),
+          }).catch(() => {
+            // ignore persistence errors; live chat already emitted
+          });
+          setText("");
         }}
       >
         <input

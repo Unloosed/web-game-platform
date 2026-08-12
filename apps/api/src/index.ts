@@ -4,6 +4,7 @@ import cookie from "@fastify/cookie";
 import { Pool } from "pg";
 import { randomBytes } from "crypto";
 import { z } from "zod";
+
 const env = z
   .object({
     DATABASE_URL: z
@@ -12,19 +13,28 @@ const env = z
     REDIS_URL: z.string().default("redis://localhost:6379"),
     PORT: z.coerce.number().default(4000),
     CORS_ORIGIN: z.string().default("http://localhost:5173"),
+    GAME_SERVER_SECRET: z
+      .string()
+      .min(32, "GAME_SERVER_SECRET must be at least 32 characters"),
+    EMPTY_ROOM_TTL_MS: z.coerce.number().default(600_000),
   })
   .parse(process.env);
+
 const db = new Pool({ connectionString: env.DATABASE_URL });
 const app = Fastify({ logger: true });
+
 await app.register(cors, { origin: env.CORS_ORIGIN, credentials: true });
 await app.register(cookie);
+
 const code = () =>
   randomBytes(5)
     .toString("base64url")
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
     .slice(0, 6);
+
 type User = { id: string; display_name: string };
+
 async function user(req: any): Promise<User | null> {
   const sid = req.cookies.session_id;
   if (!sid) return null;
@@ -34,6 +44,7 @@ async function user(req: any): Promise<User | null> {
   );
   return q.rows[0] ?? null;
 }
+
 async function required(req: any, reply: any) {
   const u = await user(req);
   if (!u) {
@@ -42,10 +53,21 @@ async function required(req: any, reply: any) {
   }
   return u;
 }
+
+function requireGameServer(request: any, reply: any): boolean {
+  if (request.headers["x-game-server-secret"] !== env.GAME_SERVER_SECRET) {
+    reply.code(401).send({ error: "invalid_game_server_credentials" });
+    return false;
+  }
+  return true;
+}
+
 app.get("/health", async () => ({ status: "ok" }));
+
 app.get("/health/db", async () => ({
   now: (await db.query("select now()")).rows[0].now,
 }));
+
 app.post("/auth/dev-login", async (req, reply) => {
   const b = z
     .object({ displayName: z.string().trim().min(1).max(50) })
@@ -70,10 +92,12 @@ app.post("/auth/dev-login", async (req, reply) => {
   });
   return { user: { id: u.id, displayName: u.display_name } };
 });
+
 app.get("/auth/me", async (req) => {
   const u = await user(req);
   return { user: u ? { id: u.id, displayName: u.display_name } : null };
 });
+
 app.get("/rooms", async () => {
   const result = await db.query(
     `
@@ -96,6 +120,7 @@ app.get("/rooms", async () => {
     rooms: result.rows,
   };
 });
+
 app.post("/rooms", async (req, reply) => {
   const u = await required(req, reply);
 
@@ -116,7 +141,7 @@ app.post("/rooms", async (req, reply) => {
   }
 
   const b = parsed.data;
-  let r;
+  let r: any;
   for (let i = 0; i < 4 && !r; i++) {
     try {
       r = (
@@ -125,7 +150,9 @@ app.post("/rooms", async (req, reply) => {
           [code(), b.name, b.isPrivate, u.id],
         )
       ).rows[0];
-    } catch {}
+    } catch {
+      // retry with a different code
+    }
   }
   if (!r) {
     reply.code(500);
@@ -138,6 +165,7 @@ app.post("/rooms", async (req, reply) => {
   reply.code(201);
   return { room: r };
 });
+
 app.post("/rooms/join", async (req, reply) => {
   const u = await required(req, reply);
   const b = z
@@ -176,6 +204,7 @@ app.post("/rooms/join", async (req, reply) => {
   );
   return { room: r };
 });
+
 app.get("/rooms/:code", async (req, reply) => {
   const u = await required(req, reply);
   const code = (req.params as any).code;
@@ -189,6 +218,7 @@ app.get("/rooms/:code", async (req, reply) => {
   }
   return { room: q.rows[0] };
 });
+
 app.post("/rooms/:code/start", async (req, reply) => {
   const u = await required(req, reply);
   const c = (req.params as any).code;
@@ -202,6 +232,7 @@ app.post("/rooms/:code/start", async (req, reply) => {
   }
   return { ok: true };
 });
+
 app.post("/rooms/:code/complete", async (req, reply) => {
   const u = await required(req, reply);
   const c = (req.params as any).code;
@@ -211,7 +242,7 @@ app.post("/rooms/:code/complete", async (req, reply) => {
       winnerUserId: z.string().nullable(),
     })
     .parse(req.body);
-  const q = await db.query(
+  const q = await db.query<{ id: string }>(
     "update rooms r set status='completed',updated_at=now() from room_members m where r.id=m.room_id and r.code=$1 and m.user_id=$2 and m.role='host' returning r.id",
     [c, u.id],
   );
@@ -225,6 +256,7 @@ app.post("/rooms/:code/complete", async (req, reply) => {
   );
   return { ok: true };
 });
+
 app.post("/rooms/:code/chat", async (req, reply) => {
   const u = await required(req, reply);
   const c = (req.params as any).code;
@@ -247,6 +279,7 @@ app.post("/rooms/:code/chat", async (req, reply) => {
   );
   return { ok: true };
 });
+
 app.get("/rooms/:code/chat", async (req, reply) => {
   const u = await required(req, reply);
   const c = (req.params as any).code;
@@ -259,4 +292,73 @@ app.get("/rooms/:code/chat", async (req, reply) => {
     ).rows,
   };
 });
+
+// Internal lifecycle routes for game-server coordination
+
+app.post("/internal/rooms/:code/lifecycle", async (request, reply) => {
+  if (!requireGameServer(request, reply)) return;
+
+  const { code } = request.params as { code: string };
+  const body = z
+    .object({
+      status: z.enum(["waiting", "running", "completed"]),
+      results: z
+        .array(
+          z.object({
+            id: z.string().uuid(),
+            tags: z.number().int().nonnegative(),
+          }),
+        )
+        .optional(),
+      winnerUserId: z.string().uuid().nullable().optional(),
+    })
+    .parse(request.body);
+
+  const roomResult = await db.query<{ id: string }>(
+    "UPDATE rooms SET status = $2, updated_at = now() WHERE code = $1 RETURNING id",
+    [code, body.status],
+  );
+
+  const room = roomResult.rows[0];
+  if (!room) {
+    reply.code(404);
+    return { error: "room_not_found" };
+  }
+
+  if (body.status === "completed" && body.results && body.results.length > 0) {
+    await db.query(
+      "insert into matches(room_id,winner_user_id,started_at,ended_at,results) values($1,$2,now(),now(),$3)",
+      [room.id, body.winnerUserId ?? null, JSON.stringify(body.results)],
+    );
+  }
+
+  return { ok: true };
+});
+
+app.delete("/internal/rooms/:code", async (request, reply) => {
+  if (!requireGameServer(request, reply)) return;
+
+  const { code } = request.params as { code: string };
+  const result = await db.query<{ id: string }>(
+    "DELETE FROM rooms WHERE code = $1 RETURNING id",
+    [code],
+  );
+  if (!result.rows[0]) {
+    reply.code(404);
+    return { error: "room_not_found" };
+  }
+  return { ok: true };
+});
+
+// Periodic cleanup of empty waiting rooms
+
+setInterval(() => {
+  void db.query(
+    `DELETE FROM rooms
+       WHERE status = 'waiting'
+         AND created_at < now() - ($1::bigint * interval '1 millisecond')`,
+    [env.EMPTY_ROOM_TTL_MS],
+  );
+}, 60_000).unref();
+
 await app.listen({ port: env.PORT, host: "0.0.0.0" });

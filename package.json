@@ -5,9 +5,9 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev": "concurrently -n api,game,web -c blue,magenta,green \"pnpm dev:api\" \"pnpm dev:game\" \"pnpm dev:web\"",
-    "dev:api": "tsx watch apps/api/src/index.ts",
-    "dev:game": "tsx watch apps/game-server/src/index.ts",
-    "dev:web": "pnpm --dir apps/web dev",
+    "dev:api": "node --env-file=.env --import tsx --watch apps/api/src/index.ts",
+    "dev:game": "node --env-file=.env --import tsx --watch apps/game-server/src/index.ts",
+    "dev:web": "pnpm --dir apps/web exec vite --host 0.0.0.0",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
