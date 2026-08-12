@@ -335,20 +335,31 @@ app.post("/internal/rooms/:code/lifecycle", async (request, reply) => {
   return { ok: true };
 });
 
-app.delete("/internal/rooms/:code", async (request, reply) => {
-  if (!requireGameServer(request, reply)) return;
+app.delete(
+  "/internal/rooms/:code/abandoned-waiting-room",
+  async (request, reply) => {
+    if (!requireGameServer(request, reply)) return;
 
-  const { code } = request.params as { code: string };
-  const result = await db.query<{ id: string }>(
-    "DELETE FROM rooms WHERE code = $1 RETURNING id",
-    [code],
-  );
-  if (!result.rows[0]) {
-    reply.code(404);
-    return { error: "room_not_found" };
-  }
-  return { ok: true };
-});
+    const { code } = request.params as { code: string };
+
+    const result = await db.query<{ id: string }>(
+      `
+        DELETE FROM rooms
+        WHERE code = $1
+          AND status = 'waiting'
+        RETURNING id
+      `,
+      [code],
+    );
+
+    if (!result.rows[0]) {
+      reply.code(409);
+      return { error: "room_not_empty_or_not_waiting" };
+    }
+
+    return { ok: true };
+  },
+);
 
 // Periodic cleanup of empty waiting rooms
 

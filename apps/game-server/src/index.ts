@@ -65,10 +65,13 @@ async function gameApi(path: string, init: RequestInit = {}): Promise<void> {
   }
 }
 
-function deletePersistentRoom(roomCode: string): Promise<void> {
-  return gameApi(`/internal/rooms/${encodeURIComponent(roomCode)}`, {
-    method: "DELETE",
-  });
+function deleteAbandonedWaitingRoom(roomCode: string): Promise<void> {
+  return gameApi(
+    `/internal/rooms/${encodeURIComponent(roomCode)}/abandoned-waiting-room`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 const http = createServer((req, res) => {
@@ -264,9 +267,13 @@ io.on("connection", (socket) => {
       if (Object.keys(current.state.players).length === 0) {
         clearInterval(current.timer);
         rooms.delete(roomCode);
-        void deletePersistentRoom(roomCode).catch((error) =>
-          reportLifecycleFailure("delete_empty_room", error),
-        );
+
+        if (current.state.phase === "waiting") {
+          void deleteAbandonedWaitingRoom(roomCode).catch((error) =>
+            reportLifecycleFailure("delete_abandoned_waiting_room", error),
+          );
+        }
+
         return;
       }
 

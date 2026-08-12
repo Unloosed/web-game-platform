@@ -162,7 +162,10 @@ function Lobby({ user, enter }: { user: User; enter: (room: Room) => void }) {
 
       <h2>Join by code</h2>
 
-      <form onSubmit={(event) => void joinRoom(event)}>
+      <form
+        data-testid="join-by-code-form"
+        onSubmit={(event) => void joinRoom(event)}
+      >
         <input
           placeholder="Enter room code"
           value={code}
@@ -284,7 +287,9 @@ function Game({
   useEffect(() => {
     void fetchApi(`/rooms/${room.code}/chat`)
       .then((response) => {
-        setChat(response.messages as { from: string; text: string; at: number }[]);
+        setChat(
+          response.messages as { from: string; text: string; at: number }[],
+        );
       })
       .catch(() => {
         // ignore chat history errors in UI; live chat still works
