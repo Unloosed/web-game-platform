@@ -10,7 +10,7 @@
     "dev:web": "pnpm --dir apps/web exec vite --host 0.0.0.0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "node --env-file=.env ./node_modules/@playwright/test/cli.js test",
     "build": "pnpm --dir apps/web build",
     "lint": "eslint .",
     "db:reset": "docker compose down -v && docker compose up -d postgres redis"

@@ -13,9 +13,11 @@ test("two users create and join a room", async ({ browser }) => {
 
   await expect(host.getByText("Room: Test Arena")).toBeVisible();
 
-  const heading = await host.locator("h1").innerText();
-  const code = heading.match(/\(([A-Z0-9]{6})\)/)?.[1];
-  expect(code).toBeTruthy();
+  await expect(host.getByTestId("invite-code")).toBeVisible();
+
+  const code = (await host.getByTestId("invite-code").innerText()).trim();
+
+  expect(code).toMatch(/^[A-Z0-9]{6}$/);
 
   await guest.goto("/");
   await guest.getByPlaceholder("Display name").fill("Guest");

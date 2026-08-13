@@ -254,8 +254,27 @@ function Game({
       },
     });
     sock.current = s;
-    s.on("server_event", (x: Snap) => setSnap(x));
-    s.on("chat_event", (x) => setChat((c) => [...c, x]));
+
+    s.on("server_event", (x: Snap) => {
+      setSnap(x);
+    });
+
+    s.on("chat_event", (x) => {
+      setChat((currentChat) => [...currentChat, x]);
+    });
+
+    s.on("connect", () => {
+      s.on("connect_error", (error) => {
+        console.error("Game socket connection failed:", error.message);
+      });
+
+      s.on("disconnect", (reason) => {
+        console.warn("Game socket disconnected:", reason);
+      });
+
+      s.emit("request_snapshot");
+    });
+
     const key = (e: KeyboardEvent) => {
       const d: Record<string, string> = {
         ArrowUp: "up",
@@ -305,7 +324,7 @@ function Game({
         Room: {room.name} ({room.code})
       </h1>
       <p>
-        Invite code: <code>{room.code}</code>
+        Invite code: <code data-testid="invite-code">{room.code}</code>
       </p>
       <label>
         <input

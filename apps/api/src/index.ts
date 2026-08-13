@@ -260,36 +260,91 @@ app.post("/rooms/:code/complete", async (req, reply) => {
 app.post("/rooms/:code/chat", async (req, reply) => {
   const u = await required(req, reply);
   const c = (req.params as any).code;
-  const b = z
-    .object({ text: z.string().trim().min(1).max(500) })
-    .parse(req.body);
+
+  const parsed = z
+    .object({
+      text: z.string().trim().min(1).max(500),
+    })
+    .safeParse(req.body);
+
+  if (!parsed.success) {
+    reply.code(400);
+
+    return {
+      error: "invalid_chat_message",
+      message: "Chat messages must contain 1 to 500 non-whitespace characters.",
+    };
+  }
+
+  const b = parsed.data;
+
   const r = (
     await db.query(
-      "select r.id from rooms r join room_members m on m.room_id=r.id where r.code=$1 and m.user_id=$2",
+      `
+        select r.id
+        from rooms r
+        join room_members m on m.room_id = r.id
+        where r.code = $1
+          and m.user_id = $2
+        limit 1
+      `,
       [c, u.id],
     )
   ).rows[0];
+
   if (!r) {
     reply.code(403);
     return { error: "not_member" };
   }
+
   await db.query(
     "insert into chat_messages(room_id,user_id,content) values($1,$2,$3)",
     [r.id, u.id, b.text],
   );
+
   return { ok: true };
 });
 
 app.get("/rooms/:code/chat", async (req, reply) => {
   const u = await required(req, reply);
   const c = (req.params as any).code;
+
+  const membership = await db.query(
+    `
+      select 1
+      from rooms r
+      join room_members m on m.room_id = r.id
+      where r.code = $1
+        and m.user_id = $2
+      limit 1
+    `,
+    [c, u.id],
+  );
+
+  if (!membership.rows[0]) {
+    reply.code(403);
+    return { error: "not_member" };
+  }
+
+  const history = await db.query(
+    `
+      select
+        cm.id,
+        u.display_name as "from",
+        cm.content as text,
+        (extract(epoch from cm.created_at) * 1000)::double precision as at
+      from chat_messages cm
+      join rooms r on r.id = cm.room_id
+      join users u on u.id = cm.user_id
+      where r.code = $1
+      order by cm.created_at asc
+      limit 100
+    `,
+    [c],
+  );
+
   return {
-    messages: (
-      await db.query(
-        'select cm.id,u.display_name as "from",cm.content as text,extract(epoch from cm.created_at)*1000 as at from chat_messages cm join rooms r on r.id=cm.room_id join users u on u.id=cm.user_id join room_members rm on rm.room_id=r.id where r.code=$1 and rm.user_id=$2 order by cm.created_at asc limit 100',
-        [c, u.id],
-      )
-    ).rows,
+    messages: history.rows,
   };
 });
 
@@ -315,21 +370,49 @@ app.post("/internal/rooms/:code/lifecycle", async (request, reply) => {
     .parse(request.body);
 
   const roomResult = await db.query<{ id: string }>(
-    "UPDATE rooms SET status = $2, updated_at = now() WHERE code = $1 RETURNING id",
+    `
+      update rooms
+      set status = $2,
+          updated_at = now()
+      where code = $1
+      returning id
+    `,
     [code, body.status],
   );
 
   const room = roomResult.rows[0];
+
   if (!room) {
     reply.code(404);
     return { error: "room_not_found" };
   }
 
   if (body.status === "completed" && body.results && body.results.length > 0) {
-    await db.query(
-      "insert into matches(room_id,winner_user_id,started_at,ended_at,results) values($1,$2,now(),now(),$3)",
-      [room.id, body.winnerUserId ?? null, JSON.stringify(body.results)],
+    const existingMatch = await db.query(
+      `
+        select 1
+        from matches
+        where room_id = $1
+        limit 1
+      `,
+      [room.id],
     );
+
+    if (!existingMatch.rows[0]) {
+      await db.query(
+        `
+          insert into matches(
+            room_id,
+            winner_user_id,
+            started_at,
+            ended_at,
+            results
+          )
+          values($1,$2,now(),now(),$3)
+        `,
+        [room.id, body.winnerUserId ?? null, JSON.stringify(body.results)],
+      );
+    }
   }
 
   return { ok: true };
@@ -365,9 +448,16 @@ app.delete(
 
 setInterval(() => {
   void db.query(
-    `DELETE FROM rooms
-       WHERE status = 'waiting'
-         AND created_at < now() - ($1::bigint * interval '1 millisecond')`,
+    `
+      delete from rooms r
+      where r.status = 'waiting'
+        and r.created_at < now() - ($1::bigint * interval '1 millisecond')
+        and not exists (
+          select 1
+          from room_members rm
+          where rm.room_id = r.id
+        )
+    `,
     [env.EMPTY_ROOM_TTL_MS],
   );
 }, 60_000).unref();
