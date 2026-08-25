@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { io, Socket } from "socket.io-client";
-type User = { id: string; displayName: string };
+type User = { id: string; displayName: string; role?: string };
 type Room = {
   id: string;
   code: string;
@@ -19,6 +19,7 @@ type P = {
   color: string;
   tags: number;
   spectator: boolean;
+  ready: boolean;
 };
 type Snap = {
   phase: string;
@@ -26,6 +27,42 @@ type Snap = {
   itPlayerId: string | null;
   players: P[];
   results?: P[];
+};
+type LeaderboardRow = {
+  id: string;
+  displayName: string;
+  matchesPlayed: number;
+  totalTags: number;
+  wins: number;
+};
+type MatchRow = {
+  id: string;
+  roomName: string;
+  winnerName: string | null;
+  endedAt: string;
+  tags: number;
+};
+type AdminUser = {
+  id: string;
+  displayName: string;
+  role: string;
+  bannedUntil: string | null;
+  mutedUntil: string | null;
+};
+type AdminRoom = {
+  code: string;
+  name: string;
+  status: string;
+  hostName: string;
+  members: number;
+};
+type AuditEntry = {
+  id: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  actorName: string;
+  createdAt: string;
 };
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:4000",
   GAME = import.meta.env.VITE_GAME_URL ?? "http://localhost:4100";
@@ -68,7 +105,68 @@ function Login({ onLogin }: { onLogin: (u: User) => void }) {
     </section>
   );
 }
-function Lobby({ user, enter }: { user: User; enter: (room: Room) => void }) {
+function Leaderboard() {
+  const [rows, setRows] = useState<LeaderboardRow[] | null>(null);
+  useEffect(() => {
+    void fetchApi("/leaderboard")
+      .then((r) => setRows(r.leaderboard))
+      .catch(() => setRows([]));
+  }, []);
+  if (!rows) return <p>Loading leaderboard…</p>;
+  if (rows.length === 0) return <p>No completed matches yet.</p>;
+  return (
+    <table data-testid="leaderboard">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Player</th>
+          <th>Tags</th>
+          <th>Wins</th>
+          <th>Matches</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={r.id}>
+            <td>{i + 1}</td>
+            <td>{r.displayName}</td>
+            <td>{r.totalTags}</td>
+            <td>{r.wins}</td>
+            <td>{r.matchesPlayed}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function MyMatches({ userId }: { userId: string }) {
+  const [rows, setRows] = useState<MatchRow[] | null>(null);
+  useEffect(() => {
+    void fetchApi(`/users/${userId}/matches`)
+      .then((r) => setRows(r.matches))
+      .catch(() => setRows([]));
+  }, [userId]);
+  if (!rows || rows.length === 0) return null;
+  return (
+    <section>
+      <h2>My recent matches</h2>
+      <ul>
+        {rows.slice(0, 5).map((m) => (
+          <li key={m.id}>
+            {m.roomName} — {m.tags} tags — winner: {m.winnerName ?? "none"}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+function Lobby({
+  user,
+  enter,
+}: {
+  user: User;
+  enter: (room: Room) => void;
+}) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [name, setName] = useState("");
   const [priv, setPriv] = useState(false);
@@ -212,6 +310,11 @@ function Lobby({ user, enter }: { user: User; enter: (room: Room) => void }) {
           </button>
         </div>
       ))}
+
+      <h2>Leaderboard</h2>
+      <Leaderboard />
+
+      <MyMatches userId={user.id} />
     </section>
   );
 }
@@ -225,16 +328,17 @@ function Game({
   back: () => void;
 }) {
   const [snap, setSnap] = useState<Snap>({
-      phase: "waiting",
-      remainingMs: 60000,
-      itPlayerId: null,
-      players: [],
+    phase: "waiting",
+    remainingMs: 60000,
+    itPlayerId: null,
+    players: [],
     }),
     [chat, setChat] = useState<{ from: string; text: string; at: number }[]>(
       [],
     ),
     [text, setText] = useState(""),
     [spectator, setSpectator] = useState(room.role === "spectator"),
+    [connErr, setConnErr] = useState(""),
     sock = useRef<Socket | null>(null),
     latestSnap = useRef<Snap | null>(null);
 
@@ -243,27 +347,51 @@ function Game({
   }, [snap]);
 
   useEffect(() => {
-    const s = io(GAME, {
-      transports: ["websocket"],
-      auth: {
-        roomCode: room.code,
-        userId: user.id,
-        displayName: user.displayName,
-        spectator: String(spectator),
-        host: String(room.hostUserId === user.id),
-      },
-    });
-    sock.current = s;
+    let disposed = false;
+    let s: Socket | null = null;
 
-    s.on("server_event", (x: Snap) => {
-      setSnap(x);
-    });
+    void (async () => {
+      let token: string;
+      try {
+        token = (
+          await fetchApi("/auth/socket-token", {
+            method: "POST",
+            body: JSON.stringify({}),
+          })
+        ).token;
+      } catch (error) {
+        setConnErr(
+          error instanceof Error ? error.message : "Could not authorize game",
+        );
+        return;
+      }
+      if (disposed) return;
 
-    s.on("chat_event", (x) => {
-      setChat((currentChat) => [...currentChat, x]);
-    });
+      // Identity is verified server-side from this one-time token; the
+      // client never asserts its own user id on the socket.
+      s = io(GAME, {
+        transports: ["websocket"],
+        auth: { roomCode: room.code, token },
+      });
+      sock.current = s;
 
-    s.on("connect", () => {
+      s.on("server_event", (x: Snap) => {
+        setSnap(x);
+      });
+
+      s.on("chat_event", (x) => {
+        setChat((currentChat) => [...currentChat, x]);
+      });
+
+      s.on("auth_error", () => {
+        setConnErr("Game connection was rejected. Please rejoin the room.");
+      });
+
+      s.on("connect", () => {
+        setConnErr("");
+        s!.emit("request_snapshot");
+      });
+
       s.on("connect_error", (error) => {
         console.error("Game socket connection failed:", error.message);
       });
@@ -271,9 +399,7 @@ function Game({
       s.on("disconnect", (reason) => {
         console.warn("Game socket disconnected:", reason);
       });
-
-      s.emit("request_snapshot");
-    });
+    })();
 
     const key = (e: KeyboardEvent) => {
       const d: Record<string, string> = {
@@ -290,7 +416,7 @@ function Game({
       if (!direction) return;
       const current = latestSnap.current ?? snap;
       if (current.phase !== "running" || spectator) return;
-      s.emit("client_event", {
+      sock.current?.emit("client_event", {
         type: "input",
         seq: Date.now(),
         direction,
@@ -299,9 +425,11 @@ function Game({
     window.addEventListener("keydown", key);
     return () => {
       window.removeEventListener("keydown", key);
-      s.close();
+      disposed = true;
+      s?.close();
+      sock.current = null;
     };
-  }, [room.code, user.id, user.displayName, spectator]);
+  }, [room.code, spectator]);
 
   useEffect(() => {
     void fetchApi(`/rooms/${room.code}/chat`)
@@ -315,8 +443,25 @@ function Game({
       });
   }, [room.code]);
 
+  const toggleSpectator = async (next: boolean): Promise<void> => {
+    // Spectator status is membership-based and server-authorized.
+    try {
+      await fetchApi("/rooms/join", {
+        method: "POST",
+        body: JSON.stringify({ code: room.code, spectator: next }),
+      });
+      setSpectator(next);
+    } catch (error) {
+      setConnErr(error instanceof Error ? error.message : "Could not switch role");
+    }
+  };
+
   const mine = room.hostUserId === user.id;
   const secs = Math.ceil(snap.remainingMs / 1000);
+  const participants = snap.players.filter((p) => !p.spectator);
+  const readyCount = participants.filter((p) => p.ready).length;
+  const mineReady = participants.find((p) => p.id === user.id)?.ready ?? false;
+  const canStart = participants.length >= 2 && readyCount === participants.length;
   return (
     <section>
       <button onClick={back}>Back to lobby</button>
@@ -330,18 +475,48 @@ function Game({
         <input
           type="checkbox"
           checked={spectator}
-          onChange={(e) => setSpectator(e.target.checked)}
+          onChange={(e) => void toggleSpectator(e.target.checked)}
         />
         Spectate only
       </label>
+      {connErr && <p role="alert">{connErr}</p>}
+      {!spectator && snap.phase !== "running" && (
+        <button
+          type="button"
+          data-testid="ready-toggle"
+          onClick={() =>
+            sock.current?.emit("client_event", {
+              type: "ready",
+              ready: !mineReady,
+            })
+          }
+        >
+          {mineReady ? "Unready" : "Ready up"}
+        </button>
+      )}
+      {snap.phase !== "running" && (
+        <p data-testid="readiness">
+          {readyCount}/{participants.length} players ready
+        </p>
+      )}
       {mine && snap.phase === "waiting" && (
-        <button type="button" onClick={() => sock.current?.emit("start_match")}>
+        <button
+          type="button"
+          data-testid="start-match"
+          disabled={!canStart}
+          title={
+            canStart ? undefined : "Waiting for at least two ready players"
+          }
+          onClick={() => sock.current?.emit("start_match")}
+        >
           Start match
         </button>
       )}
       {snap.phase === "completed" && mine && (
         <button
           type="button"
+          data-testid="restart-match"
+          disabled={!canStart}
           onClick={() => sock.current?.emit("restart_match")}
         >
           Play again
@@ -389,6 +564,11 @@ function Game({
           .map((p) => (
             <div key={p.id}>
               {p.name}: {p.tags} tags {snap.itPlayerId === p.id ? "(IT)" : ""}
+              {p.spectator
+                ? " (spectator)"
+                : snap.phase !== "running" && p.ready
+                  ? " (ready)"
+                  : ""}
             </div>
           ))}
       </div>
@@ -435,16 +615,170 @@ function Game({
     </section>
   );
 }
+function Admin({ user, back }: { user: User; back: () => void }) {
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [rooms, setRooms] = useState<AdminRoom[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [err, setErr] = useState("");
+
+  const reload = async (): Promise<void> => {
+    try {
+      setErr("");
+      setUsers((await fetchApi("/admin/users")).users);
+      setRooms((await fetchApi("/admin/rooms")).rooms);
+      setAudit((await fetchApi("/admin/audit")).entries);
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "Admin data unavailable");
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  const act = async (path: string, body: unknown): Promise<void> => {
+    try {
+      await fetchApi(path, { method: "POST", body: JSON.stringify(body) });
+      await reload();
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "Action failed");
+    }
+  };
+
+  const isAdmin = user.role === "admin";
+
+  return (
+    <section>
+      <button onClick={back}>Back to lobby</button>
+      <h1>Admin</h1>
+      {err && <p role="alert">{err}</p>}
+
+      <h2>Users</h2>
+      <table aria-label="admin-users">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((u) => (
+            <tr key={u.id}>
+              <td>{u.displayName}</td>
+              <td>{u.role}</td>
+              <td>
+                {u.bannedUntil && new Date(u.bannedUntil) > new Date()
+                  ? "banned"
+                  : u.mutedUntil && new Date(u.mutedUntil) > new Date()
+                    ? "muted"
+                    : "active"}
+              </td>
+              <td>
+                <button
+                  onClick={() => void act(`/admin/users/${u.id}/mute`, { minutes: 10 })}
+                >
+                  Mute 10m
+                </button>{" "}
+                <button
+                  onClick={() => void act(`/admin/users/${u.id}/mute`, { minutes: 0 })}
+                >
+                  Unmute
+                </button>{" "}
+                <button
+                  onClick={() => void act(`/admin/users/${u.id}/ban`, { hours: 24 })}
+                >
+                  Ban 24h
+                </button>{" "}
+                <button
+                  onClick={() => void act(`/admin/users/${u.id}/ban`, { hours: 0 })}
+                >
+                  Unban
+                </button>
+                {isAdmin && u.role !== "admin" && (
+                  <>
+                    {" "}
+                    <button
+                      onClick={() =>
+                        void act(`/admin/users/${u.id}/role`, { role: "moderator" })
+                      }
+                    >
+                      Make moderator
+                    </button>
+                  </>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <h2>Rooms</h2>
+      <table aria-label="admin-rooms">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Code</th>
+            <th>Status</th>
+            <th>Host</th>
+            <th>Members</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rooms.map((r) => (
+            <tr key={r.code}>
+              <td>{r.name}</td>
+              <td>{r.code}</td>
+              <td>{r.status}</td>
+              <td>{r.hostName}</td>
+              <td>{r.members}</td>
+              <td>
+                <button
+                  onClick={() => void act(`/admin/rooms/${r.code}/close`, {})}
+                >
+                  Close room
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <h2>Audit log</h2>
+      <ul aria-label="admin-audit">
+        {audit.map((a) => (
+          <li key={a.id}>
+            {new Date(a.createdAt).toISOString()} — {a.actorName} {a.action}{" "}
+            {a.targetType} {a.targetId}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 function App() {
   const [u, setU] = useState<User | null>(null),
-    [r, setR] = useState<Room | null>(null);
+    [r, setR] = useState<Room | null>(null),
+    [admin, setAdmin] = useState(false);
   useEffect(() => {
     fetchApi("/auth/me")
       .then((x) => setU(x.user))
       .catch(() => {});
   }, []);
   if (!u) return <Login onLogin={setU} />;
-  if (!r) return <Lobby user={u} enter={setR} />;
+  if (admin)
+    return <Admin user={u} back={() => setAdmin(false)} />;
+  if (!r)
+    return (
+      <>
+        <Lobby user={u} enter={setR} />
+        {(u.role === "admin" || u.role === "moderator") && (
+          <button onClick={() => setAdmin(true)}>Open admin</button>
+        )}
+      </>
+    );
   return <Game user={u} room={r} back={() => setR(null)} />;
 }
 createRoot(document.getElementById("root")!).render(<App />);

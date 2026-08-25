@@ -1,5 +1,25 @@
 # Milestone 3.1: Room Lifecycle and Rematch Repair
 
+**Status: Applied — complete.** The roadmap (`web-game-platform-milestone-roadmap.md`)
+tracks this milestone as delivered; this document is preserved as the design record.
+
+Implementation notes that differ from or extend the original patch sketch:
+
+- The abandoned-room cleanup route is `DELETE /internal/rooms/:code/abandoned-waiting-room`
+  (guarded to `status = 'waiting'`), not a bare room delete.
+- Ready-up is fully implemented: durable `room_members.ready`
+  (`infra/migrations/003-room-member-ready.sql`), a validated `ready` client event,
+  persistence via `POST /internal/rooms/:code/ready`, restore-on-reconnect through
+  handshake verification, and a startup gate (minimum two non-spectator participants,
+  all non-spectators ready) shared by `start_match` and `restart_match`.
+- Mid-session spectator changes propagate from the API to the live socket session
+  through `POST /internal/users/:id/spectator`, so role is enforced server-side at all
+  times, not only at handshake.
+- Match duration is configurable via `GAME_MATCH_MS` (default 60000); lower it when
+  running the completion/rematch E2E tests.
+- Completion idempotency exists at both ends: a phase-transition guard in the tick loop
+  and an existing-match guard inside the transactional lifecycle route.
+
 Apply this patch on top of the Milestone 3 project. It addresses the following verified defects:
 
 - A completed match has no in-room rematch flow.

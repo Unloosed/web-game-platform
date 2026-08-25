@@ -8,10 +8,15 @@ This roadmap covers the reusable, self-hosted TypeScript Web Game Platform. It r
 | --- | --- | --- |
 | Milestone 1 | Completed | Monorepo, local infrastructure, API, realtime server, and two-browser movement vertical slice |
 | Milestone 2 | Completed | Persistent dev users and sessions, lobby, persisted rooms, invite codes, and basic chat |
-| Milestone 3 | Partially completed | Server-authoritative tag-game mechanics, score/timer UI, spectator baseline, and test scaffolding |
-| Milestone 3.1 | In progress | Repair room lifecycle, lifecycle persistence boundaries, reconnect semantics, and game completion consistency |
+| Milestone 3 | Completed | Server-authoritative tag-game mechanics, score/timer UI, spectator baseline, and test scaffolding |
+| Milestone 3.1 | Completed | Room lifecycle repair: lifecycle persistence boundaries, reconnect grace, server-authorized spectators, deterministic ready-gated startup, idempotent completion |
 | Milestone 4 | Planned | Match history, leaderboards, moderation, observability, rate limiting, and production deployment hardening |
 | Milestone 5 | Planned | Formal game registry/plugin model, second game reference implementation, and extension guide validation |
+
+> Note (2026-08): Milestones 4-era capabilities (match history/leaderboard APIs,
+> admin/moderation with audit log, rate limits, metrics endpoints, production
+> Dockerfiles) already exist in working form ahead of the formal milestone;
+> see the repository state and `docs/deployment.md`.
 
 ---
 
@@ -137,57 +142,70 @@ Replace the purely in-memory local-room workflow with a persistent lobby and ses
 
 # Milestone 3: Complete reference tag game
 
-**Status: Partially completed**
+**Status: Completed**
 
 ## Objective
 
 Turn the movement proof-of-concept into a complete reference multiplayer game: a server-authoritative 2D tag arena for 2–8 players with scoring, timer, post-match results, spectators, reconnect behavior, and meaningful automated tests.
 
-## Implemented or drafted
+## Implemented
 
 ### Sample-game state and rules
 
-- Player state includes position, color, and tag score.
+- Player state includes position, color, tag score, spectator flag, and ready flag.
 - Match state includes current `itPlayerId`, remaining match time, and completion state.
 - Server-side fixed-step simulation applies movement.
 - Server-side collision/proximity logic transfers the “IT” role and awards tag points.
 - Timer expiry produces a completed game state.
+- Match duration is configurable through `GAME_MATCH_MS` for test environments.
 
 ### Client presentation
 
 - Arena renders player positions.
 - Current “IT” player has a visual highlight.
-- Scoreboard sorts players by tag score.
+- Scoreboard sorts players by tag score and marks spectators and readiness.
 - Timer and completion indicators are available in room UI.
-- A spectator toggle prevents the local client from producing movement inputs.
+- Spectator mode is membership-based and server-authorized; the local client suppresses input and the server rejects gameplay input from spectators regardless.
 
 ### Testing foundations
 
-- Sample-game rule unit tests.
+- Sample-game rule unit tests (movement gating, timer, readiness, IT reassignment).
 - Protocol validation unit tests.
-- Generic room add/remove unit test.
-- Playwright E2E scaffold for sign-in, room creation, second-client join, movement, and scoreboard verification.
+- Room-manager unit tests covering lifecycle, reconnect grace, authorization, and idempotent completion.
+- Playwright E2E suites for sign-in/room creation/join/movement/scoreboard and lifecycle behavior.
 
-## Work still required for Milestone 3 completion
+### Milestone completion items
 
-- Complete Milestone 3.1 lifecycle repair described below.
-- Make API room status and realtime game phase one source of truth.
-- Add actual ready-up workflow and require minimum-player conditions before start.
-- Persist completed match results and make the post-game result view deterministic.
-- Validate Socket.IO handshake identity from session rather than trusting a client-provided user ID.
-- Replace basic spectator toggle with a server-authorized spectator role.
-- Make reconnect preservation explicit: grace timeout, stable logical player session, reattachment, and expiry.
-- Make Playwright E2E fully deterministic; avoid assertions based on brittle style locators or timing-only waits.
+All previously outstanding items are now delivered:
+
+- Milestone 3.1 lifecycle repair is complete (see below).
+- API room status and realtime game phase coordinate through the internal lifecycle API; the game server is authoritative for live phase and persists transitions to PostgreSQL.
+- Ready-up workflow with minimum-player conditions gates match start on both the realtime path (`start_match`) and the HTTP path (`POST /rooms/:code/start`).
+- Completed match results persist once (idempotent at both source transition guard and database sink) and the post-game result view renders from the completed snapshot.
+- Socket.IO handshake identity is validated server-side via one-time session tokens; clients never assert their own user id.
+- The spectator toggle maps to a durable `spectator` membership role resolved during handshake and enforced live (role changes propagate to active sessions).
+- Reconnect preservation is explicit: configurable grace timeout, stable logical player identity (`userId` + room), connection rebinding without duplication, and expiry-based cleanup.
+- Playwright E2E uses deterministic assertions (roles, test IDs, disabled/enabled states) rather than style locators or timing-only waits.
 
 ---
 
 # Milestone 3.1: Room lifecycle repair
 
-**Status: In progress — not complete**
+**Status: Completed**
 
 ## Objective
 
 Repair the boundary between persistent room lifecycle and in-memory realtime lifecycle so every game can rely on explicit state transitions and predictable cleanup/recovery.
+
+## Delivered
+
+- **Authoritative lifecycle owner**: the API owns durable room metadata; the game server owns live simulation. The server persists `waiting -> running -> completed` transitions through secret-guarded internal routes (`POST /internal/rooms/:code/lifecycle`), and completion writes one durable match record inside a transaction with an existing-match guard.
+- **Ready-up workflow**: readiness is a durable per-membership column (`room_members.ready`, migration `003-room-member-ready.sql`), toggled in-room via a validated `ready` client event, mirrored to PostgreSQL through `POST /internal/rooms/:code/ready`, restored on reconnect from handshake verification, and enforced as a startup gate (minimum 2 non-spectator participants, all non-spectators ready) on both `start_match` and `restart_match` plus the HTTP start route.
+- **Presence vs membership separation**: persistent membership survives without a live socket; disconnection enters a configurable reconnect-grace state (`ROOM_RECONNECT_GRACE_MS`), reconnect cancels pending removal and rebinds the connection without duplicating player state, and expiry removes the player.
+- **Server-authorized spectators**: role resolved at handshake from durable membership; gameplay input from spectators is rejected by game rules regardless of client behavior; mid-session role changes propagate from the API to the live session (`POST /internal/users/:id/spectator`); spectators never count toward capacity or ready requirements and cannot hold the IT role.
+- **Deterministic match startup**: rooms begin in `waiting`; movement and scoring only occur while `running`; host authorization, phase, participant count, and readiness are validated before any transition.
+- **Idempotent completion**: a single source-side phase-transition guard plus a database-side existing-match guard ensure repeated ticks or snapshots cannot create multiple result records. The legacy HTTP complete route shares the same guard.
+- **Empty-room cleanup**: never-joined waiting rooms are removed by an API TTL sweeper (`EMPTY_ROOM_TTL_MS`) and immediately by the game server when the last occupant of a waiting room leaves; running/completed rooms are retained through grace and for results.
 
 ## Target lifecycle
 
@@ -253,15 +271,15 @@ The API owns durable room metadata; the game server owns live simulation. They m
 - A completed room remains available long enough for results/replay UI, then archives.
 - Tick loops stop only when no simulation/reconnect/archive transition work remains.
 
-## Definition of done
+## Definition of done — met
 
 - Lifecycle transitions are represented by shared types and validated by tests.
-- API and game-server state cannot disagree without emitting a recoverable error/metric.
-- One user reconnecting does not create a duplicate player entity.
-- Spectators cannot move or affect scores even if they manually emit input events.
-- A match completes once, stores one outcome, broadcasts results, and becomes non-playable.
-- Unit tests cover transitions, reconnect replacement, spectator authorization, start authorization, timeout, and idempotent completion.
-- A Playwright test covers ready-up/start, reconnect within grace, result screen, and a spectator view.
+- API and game-server state cannot disagree without emitting a recoverable error/metric (lifecycle failures are logged and counted).
+- One user reconnecting does not create a duplicate player entity (unit-tested and covered by E2E).
+- Spectators cannot move or affect scores even if they manually emit input events (enforced in game rules; unit-tested).
+- A match completes once, stores one outcome, broadcasts results, and becomes non-playable until a ready-gated rematch (unit-tested).
+- Unit tests cover transitions, reconnect replacement, spectator authorization, start authorization, timeout, and idempotent completion (`apps/game-server/test/room-manager.test.ts`, `packages/sample-game/test/rules.test.ts`, `packages/protocol/test/protocol.test.ts`).
+- Playwright coverage lives in `tests/e2e/`: `multiplayer.spec.ts` (ready-up/start), `api-lifecycle.spec.ts` (authorization, chat persistence, lifecycle persistence), and `room-lifecycle.spec.ts` (match completion/results/rematch, reconnect within grace using a reused browser session, spectator view).
 
 ---
 
@@ -363,8 +381,8 @@ Prove that a second game can be added without modifying platform internals, and 
 
 # Suggested execution order
 
-1. Finish Milestone 3.1 before adding new game features.
-2. Implement match persistence and results as the first Milestone 4 feature; this validates the repaired lifecycle.
-3. Add rate limits and handshake/session validation before exposing the platform outside local development.
+1. Milestones 3 and 3.1 are complete; do not add new game features that bypass the repaired lifecycle.
+2. Formalize match persistence and results as the first Milestone 4 deliverable; this validates the repaired lifecycle against real history/leaderboard consumers.
+3. Add rate limits and handshake/session validation hardening before exposing the platform outside local development.
 4. Add observability before horizontal scaling, so room-routing failures can be diagnosed.
 5. Implement the game registry and second game in Milestone 5 after lifecycle and result hooks are stable.

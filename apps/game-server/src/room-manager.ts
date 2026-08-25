@@ -1,8 +1,11 @@
 import {
   addPlayer,
+  canStartMatch,
   initialState,
   move,
   results,
+  setReady as applyReady,
+  setSpectator as applySpectator,
   tick,
   type State,
 } from "../../../packages/sample-game/src/index.js";
@@ -20,6 +23,11 @@ export type RoomLifecycleApi = {
     },
   ): Promise<void>;
   deleteAbandonedWaitingRoom(roomCode: string): Promise<void>;
+  persistReady(
+    roomCode: string,
+    userId: string,
+    ready: boolean,
+  ): Promise<void>;
 };
 
 export type PlayerConnection = {
@@ -28,6 +36,8 @@ export type PlayerConnection = {
   spectator: boolean;
   host: boolean;
   socketId: string;
+  /** Restored from durable membership when a player reconnects. */
+  ready?: boolean;
 };
 
 type RoomInstance = {
@@ -40,6 +50,7 @@ type RoomInstance = {
 export type RoomManagerOptions = {
   reconnectGraceMs: number;
   tickMs?: number;
+  matchMs?: number;
   onBroadcast(roomCode: string, snapshot: Snapshot): void;
   onLifecycleFailure?(operation: string, error: unknown): void;
   api: RoomLifecycleApi;
@@ -52,9 +63,11 @@ export class RoomManager {
     ReturnType<typeof setTimeout>
   >();
   private readonly tickMs: number;
+  private readonly matchMs: number;
 
   constructor(private readonly options: RoomManagerOptions) {
     this.tickMs = options.tickMs ?? 50;
+    this.matchMs = options.matchMs ?? initialState().remainingMs;
   }
 
   connect(roomCode: string, connection: PlayerConnection): Snapshot {
@@ -68,6 +81,7 @@ export class RoomManager {
       connection.userId,
       connection.displayName,
       connection.spectator,
+      connection.ready,
     );
 
     if (connection.host) {
@@ -143,6 +157,9 @@ export class RoomManager {
     if (room.hostUserId !== userId || room.state.phase !== "waiting") {
       return false;
     }
+    if (!canStartMatch(room.state)) {
+      return false;
+    }
 
     this.resetForMatch(roomCode, room);
     return true;
@@ -154,8 +171,41 @@ export class RoomManager {
     if (room.hostUserId !== userId || room.state.phase !== "completed") {
       return false;
     }
+    if (!canStartMatch(room.state)) {
+      return false;
+    }
 
     this.resetForMatch(roomCode, room);
+    return true;
+  }
+
+  /** Explicit ready/unready toggle; rejected for spectators and mid-match. */
+  setReady(roomCode: string, userId: string, ready: boolean): Snapshot | null {
+    const room = this.rooms.get(roomCode);
+    if (!room) return null;
+
+    const previous = room.state.players[userId]?.ready ?? false;
+    room.state = applyReady(room.state, userId, ready);
+
+    if (room.state.players[userId]?.ready !== previous) {
+      void this.options.api
+        .persistReady(roomCode, userId, ready)
+        .catch((error) => {
+          this.options.onLifecycleFailure?.("persist_ready_state", error);
+        });
+      return this.broadcast(roomCode);
+    }
+
+    return this.snapshot(roomCode, room);
+  }
+
+  /** Server-authorized spectator role change for a live participant. */
+  setSpectator(roomCode: string, userId: string, spectator: boolean): boolean {
+    const room = this.rooms.get(roomCode);
+    if (!room || !room.state.players[userId]) return false;
+
+    room.state = applySpectator(room.state, userId, spectator);
+    this.broadcast(roomCode);
     return true;
   }
 
@@ -166,6 +216,44 @@ export class RoomManager {
 
   hasRoom(roomCode: string): boolean {
     return this.rooms.has(roomCode);
+  }
+
+  roomCount(): number {
+    return this.rooms.size;
+  }
+
+  /** Immediately remove a player (moderation kick) without grace period. */
+  kick(roomCode: string, userId: string): boolean {
+    const room = this.rooms.get(roomCode);
+    if (!room || !room.state.players[userId]) return false;
+
+    this.cancelPendingRemoval(roomCode, userId);
+    room.connectedSocketIdsByUser.delete(userId);
+    const { [userId]: _removed, ...remainingPlayers } = room.state.players;
+    room.state = {
+      ...room.state,
+      players: remainingPlayers,
+      itPlayerId: room.state.itPlayerId === userId ? null : room.state.itPlayerId,
+    };
+
+    if (Object.keys(remainingPlayers).length === 0) {
+      clearInterval(room.timer);
+      this.rooms.delete(roomCode);
+      return true;
+    }
+
+    this.broadcast(roomCode);
+    return true;
+  }
+
+  /** Immediately tear down a room (moderation close), skipping grace. */
+  forceClose(roomCode: string): boolean {
+    const room = this.rooms.get(roomCode);
+    if (!room) return false;
+
+    clearInterval(room.timer);
+    this.rooms.delete(roomCode);
+    return true;
   }
 
   dispose(): void {
@@ -184,7 +272,7 @@ export class RoomManager {
     if (existing) return existing;
 
     const room: RoomInstance = {
-      state: initialState(),
+      state: initialState(this.matchMs),
       hostUserId: null,
       connectedSocketIdsByUser: new Map(),
       timer: setInterval(() => {
@@ -227,7 +315,7 @@ export class RoomManager {
   private resetForMatch(roomCode: string, room: RoomInstance): void {
     const priorPlayers = Object.values(room.state.players);
 
-    room.state = initialState();
+    room.state = initialState(this.matchMs);
 
     for (const player of priorPlayers) {
       room.state = addPlayer(
@@ -235,6 +323,7 @@ export class RoomManager {
         player.id,
         player.name,
         player.spectator,
+        player.ready,
       );
     }
 

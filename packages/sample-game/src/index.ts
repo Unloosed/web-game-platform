@@ -2,7 +2,8 @@ import type { Direction, Player } from "../../protocol/src/index.js";
 export const ARENA = 400,
   SPEED = 150,
   MATCH_MS = 60_000,
-  TAG_DISTANCE = 26;
+  TAG_DISTANCE = 26,
+  MIN_PLAYERS = 2;
 export type State = {
   players: Record<string, Player>;
   itPlayerId: string | null;
@@ -17,10 +18,10 @@ const colors = [
   "#c084fc",
   "#2dd4bf",
 ];
-export const initialState = (): State => ({
+export const initialState = (matchMs: number = MATCH_MS): State => ({
   players: {},
   itPlayerId: null,
-  remainingMs: MATCH_MS,
+  remainingMs: matchMs,
   phase: "waiting",
 });
 export function addPlayer(
@@ -28,11 +29,20 @@ export function addPlayer(
   id: string,
   name: string,
   spectator: boolean,
+  ready?: boolean,
 ): State {
   if (s.players[id])
     return {
       ...s,
-      players: { ...s.players, [id]: { ...s.players[id], name, spectator } },
+      players: {
+        ...s.players,
+        [id]: {
+          ...s.players[id],
+          name,
+          spectator,
+          ready: ready ?? s.players[id].ready,
+        },
+      },
     };
   const n = Object.keys(s.players).length;
   return {
@@ -43,6 +53,7 @@ export function addPlayer(
         id,
         name,
         spectator,
+        ready: ready ?? false,
         x: 60 + (n % 4) * 85,
         y: 60 + Math.floor(n / 4) * 85,
         color: colors[n % colors.length],
@@ -50,6 +61,56 @@ export function addPlayer(
       },
     },
   };
+}
+/** Explicitly toggles a non-spectator player's readiness outside a live match. */
+export function setReady(s: State, id: string, ready: boolean): State {
+  const player = s.players[id];
+  if (
+    s.phase === "running" ||
+    !player ||
+    player.spectator ||
+    player.ready === ready
+  )
+    return s;
+  return {
+    ...s,
+    players: { ...s.players, [id]: { ...player, ready } },
+  };
+}
+
+/**
+ * Server-authorized spectator role change for a live participant.
+ * A spectator leaving play releases the IT role immediately.
+ */
+export function setSpectator(s: State, id: string, spectator: boolean): State {
+  const player = s.players[id];
+  if (!player || player.spectator === spectator) return s;
+
+  const next: State = {
+    ...s,
+    players: { ...s.players, [id]: { ...player, spectator } },
+    itPlayerId: s.itPlayerId === id && spectator ? null : s.itPlayerId,
+  };
+
+  if (
+    next.phase === "running" &&
+    (!next.itPlayerId || !next.players[next.itPlayerId])
+  ) {
+    const replacement = Object.values(next.players).find((p) => !p.spectator);
+    next.itPlayerId = replacement?.id ?? null;
+  }
+
+  return next;
+}
+/**
+ * Deterministic startup rule shared by first start and rematch:
+ * enough non-spectator players, and every one of them explicitly ready.
+ */
+export function canStartMatch(s: State): boolean {
+  const participants = Object.values(s.players).filter((p) => !p.spectator);
+  return (
+    participants.length >= MIN_PLAYERS && participants.every((p) => p.ready)
+  );
 }
 export function move(s: State, id: string, d: Direction, dt: number): State {
   if (
@@ -84,7 +145,7 @@ export function tick(s: State, dt: number): State {
     players: { ...s.players },
     remainingMs: Math.max(0, s.remainingMs - dt * 1000),
   };
-  if (!n.itPlayerId) {
+  if (!n.itPlayerId || n.players[n.itPlayerId]?.spectator) {
     const p = Object.values(n.players).find((x) => !x.spectator);
     n.itPlayerId = p?.id ?? null;
   }

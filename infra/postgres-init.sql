@@ -1,7 +1,12 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE TABLE users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), display_name varchar(50) NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE users (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), display_name varchar(50) NOT NULL, role varchar(16) NOT NULL DEFAULT 'player' CHECK(role IN ('player','moderator','admin')), banned_until timestamptz, muted_until timestamptz, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE sessions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL);
 CREATE TABLE rooms (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), code varchar(6) NOT NULL UNIQUE, name varchar(64) NOT NULL, is_private boolean NOT NULL DEFAULT false, status varchar(16) NOT NULL DEFAULT 'waiting' CHECK(status IN ('waiting','running','completed','archived')), host_user_id uuid NOT NULL REFERENCES users(id), max_players integer NOT NULL DEFAULT 8, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
-CREATE TABLE room_members (room_id uuid REFERENCES rooms(id) ON DELETE CASCADE, user_id uuid REFERENCES users(id) ON DELETE CASCADE, role varchar(16) NOT NULL CHECK(role IN ('host','player','spectator')), joined_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(room_id,user_id));
+CREATE TABLE room_members (room_id uuid REFERENCES rooms(id) ON DELETE CASCADE, user_id uuid REFERENCES users(id) ON DELETE CASCADE, role varchar(16) NOT NULL CHECK(role IN ('host','player','spectator')), ready boolean NOT NULL DEFAULT false, joined_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(room_id,user_id));
 CREATE TABLE chat_messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), room_id uuid NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, user_id uuid NOT NULL REFERENCES users(id), content varchar(500) NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE matches (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), room_id uuid NOT NULL REFERENCES rooms(id), winner_user_id uuid REFERENCES users(id), started_at timestamptz NOT NULL, ended_at timestamptz, results jsonb NOT NULL DEFAULT '[]'::jsonb);
+CREATE TABLE match_players (match_id uuid NOT NULL REFERENCES matches(id) ON DELETE CASCADE, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, tags integer NOT NULL DEFAULT 0, PRIMARY KEY(match_id,user_id));
+CREATE TABLE audit_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_user_id uuid NOT NULL REFERENCES users(id), action varchar(64) NOT NULL, target_type varchar(32) NOT NULL, target_id varchar(64) NOT NULL, details jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX match_players_user_idx ON match_players(user_id);
+CREATE INDEX matches_room_idx ON matches(room_id);
+CREATE INDEX audit_log_created_idx ON audit_log(created_at DESC);

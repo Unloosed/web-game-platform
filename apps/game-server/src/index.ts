@@ -1,61 +1,183 @@
 import { createServer } from "node:http";
-import { Server } from "socket.io";
+import { Server, type Socket } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
+import { createClient } from "redis";
 import { z } from "zod";
 import { clientEventSchema } from "../../../packages/protocol/src/index.js";
+import {
+  isChatAllowed,
+  MetricsRegistry,
+  parseBannedWords,
+} from "../../../packages/platform/src/index.js";
 import { RoomManager } from "./room-manager.js";
 
-const port = z.coerce.number().default(4100).parse(process.env.GAME_PORT);
-const corsOrigin = process.env.CORS_ORIGIN ?? "http://localhost:5173";
-const reconnectGraceMs = Number(process.env.ROOM_RECONNECT_GRACE_MS ?? 15_000);
-const apiUrl = process.env.API_URL ?? "http://localhost:4000";
+const env = z
+  .object({
+    GAME_PORT: z.coerce.number().default(4100),
+    CORS_ORIGIN: z.string().default("http://localhost:5173"),
+    REDIS_URL: z.string().optional(),
+    ROOM_RECONNECT_GRACE_MS: z.coerce.number().default(15_000),
+    GAME_MATCH_MS: z.coerce.number().int().positive().default(60_000),
+    API_URL: z.string().default("http://localhost:4000"),
+    GAME_SERVER_SECRET: z
+      .string()
+      .min(32, "GAME_SERVER_SECRET must be at least 32 characters"),
+    MODERATION_BANNED_WORDS: z.string().default("spam,scam"),
+  })
+  .parse(process.env);
 
-const gameServerSecret = z
-  .string()
-  .min(32, "GAME_SERVER_SECRET must be at least 32 characters")
-  .parse(process.env.GAME_SERVER_SECRET);
+const bannedWords = parseBannedWords(env.MODERATION_BANNED_WORDS);
 
-async function gameApi(path: string, init: RequestInit = {}): Promise<void> {
+const metrics = new MetricsRegistry();
+metrics.gauge("game_rooms_active", "Rooms with a live simulation");
+metrics.gauge("game_players_connected", "Users with a live socket");
+metrics.counter("game_socket_connects_total", "Verified socket connections");
+metrics.counter("game_handshake_rejections_total", "Handshakes rejected by auth", );
+metrics.counter("game_inputs_rejected_total", "Gameplay inputs rejected by rate limit or phase");
+metrics.counter("game_chat_rejected_total", "Chat messages rejected by rate limit or moderation");
+metrics.counter("game_matches_completed_total", "Matches that reached completion");
+
+const log = (level: string, event: string, fields: Record<string, unknown> = {}) =>
+  console.log(JSON.stringify({ level, event, ...fields }));
+
+function readJson(req: import("node:http").IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk: Buffer) => {
+      data += chunk.toString();
+      if (data.length > 16_384) req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+async function gameApi(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
 
-  headers.set("x-game-server-secret", gameServerSecret);
+  headers.set("x-game-server-secret", env.GAME_SERVER_SECRET);
 
   if (init.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
 
-  const response = await fetch(`${apiUrl}${path}`, {
-    ...init,
-    headers,
-  });
-
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`Game API request failed: ${response.status} ${path}`);
-  }
+  return fetch(`${env.API_URL}${path}`, { ...init, headers });
 }
 
 function deleteAbandonedWaitingRoom(roomCode: string): Promise<void> {
   return gameApi(
     `/internal/rooms/${encodeURIComponent(roomCode)}/abandoned-waiting-room`,
-    {
-      method: "DELETE",
-    },
-  );
+    { method: "DELETE" },
+  ).then(() => undefined);
+}
+
+function persistReady(
+  roomCode: string,
+  userId: string,
+  ready: boolean,
+): Promise<void> {
+  return gameApi(`/internal/rooms/${encodeURIComponent(roomCode)}/ready`, {
+    method: "POST",
+    body: JSON.stringify({ userId, ready }),
+  }).then(() => undefined);
 }
 
 function reportLifecycleFailure(operation: string, error: unknown): void {
-  console.error(
-    JSON.stringify({
-      level: "error",
-      operation,
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
+  log("error", "lifecycle_failure", {
+    operation,
+    error: error instanceof Error ? error.message : String(error),
+  });
 }
 
-const http = createServer((req, res) => {
-  if (req.url === "/health") {
+const http = createServer(async (req, res) => {
+  const url = new URL(req.url ?? "/", "http://localhost");
+
+  if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end('{"status":"ok"}');
+    return;
+  }
+
+  if (url.pathname === "/metrics") {
+    res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
+    res.end(metrics.render());
+    return;
+  }
+
+  if (url.pathname.startsWith("/internal/")) {
+    // Internal moderation endpoints are authorized by the shared secret.
+    if (req.headers["x-game-server-secret"] !== env.GAME_SERVER_SECRET) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end('{"error":"invalid_game_server_credentials"}');
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname.startsWith("/internal/rooms/")) {
+      const parts = url.pathname.split("/");
+      const code = decodeURIComponent(parts[3] ?? "");
+      const action = parts[4];
+      if (code && action === "close") {
+        io.in(code).disconnectSockets(true);
+        roomManager.forceClose(code);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"ok":true}');
+        return;
+      }
+    }
+
+    if (
+      req.method === "POST" &&
+      /^\/internal\/users\/[^/]+\/disconnect$/.test(url.pathname)
+    ) {
+      const userId = decodeURIComponent(url.pathname.split("/")[3]);
+      const targets = socketsByUser.get(userId) ?? new Set<Socket>();
+      for (const socket of targets) {
+        socket.disconnect(true);
+      }
+      log("info", "internal_disconnect_user", { userId, sockets: targets.size });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+      return;
+    }
+
+    // Applies a durable membership role change to the live session so a
+    // spectator cannot keep issuing gameplay input after toggling role.
+    if (
+      req.method === "POST" &&
+      /^\/internal\/users\/[^/]+\/spectator$/.test(url.pathname)
+    ) {
+      const userId = decodeURIComponent(url.pathname.split("/")[3]);
+      try {
+        const body = z
+          .object({
+            roomCode: z.string().min(1).max(6),
+            spectator: z.boolean(),
+          })
+          .parse(await readJson(req));
+
+        roomManager.setSpectator(body.roomCode, userId, body.spectator);
+        log("info", "internal_spectator_change", {
+          userId,
+          roomCode: body.roomCode,
+          spectator: body.spectator,
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"ok":true}');
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end('{"error":"invalid_spectator_request"}');
+      }
+      return;
+    }
+
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end('{"error":"not_found"}');
     return;
   }
 
@@ -65,21 +187,37 @@ const http = createServer((req, res) => {
 
 const io = new Server(http, {
   cors: {
-    origin: corsOrigin,
+    origin: env.CORS_ORIGIN,
     credentials: true,
   },
+  maxHttpBufferSize: 16 * 1024,
 });
 
+let rateLimitRedis: ReturnType<typeof createClient> | null = null;
+
+// Horizontal scaling: with REDIS_URL set, the Socket.IO Redis adapter
+// broadcasts room events across replicas. Room simulation ownership still
+// requires sticky routing per room (see docs/deployment.md).
+if (env.REDIS_URL) {
+  const pub = createClient({ url: env.REDIS_URL });
+  const sub = pub.duplicate();
+  pub.on("error", (e) => log("error", "redis_pub_error", { error: e.message }));
+  sub.on("error", (e) => log("error", "redis_sub_error", { error: e.message }));
+  await pub.connect();
+  await sub.connect();
+  io.adapter(createAdapter(pub, sub));
+  rateLimitRedis = pub;
+}
+
 const roomManager = new RoomManager({
-  reconnectGraceMs,
+  reconnectGraceMs: env.ROOM_RECONNECT_GRACE_MS,
+  matchMs: env.GAME_MATCH_MS,
   api: {
     markRunning: (roomCode) =>
       gameApi(`/internal/rooms/${encodeURIComponent(roomCode)}/lifecycle`, {
         method: "POST",
-        body: JSON.stringify({
-          status: "running",
-        }),
-      }),
+        body: JSON.stringify({ status: "running" }),
+      }).then(() => undefined),
 
     persistCompletion: (roomCode, completion) =>
       gameApi(`/internal/rooms/${encodeURIComponent(roomCode)}/lifecycle`, {
@@ -89,9 +227,10 @@ const roomManager = new RoomManager({
           winnerUserId: completion.winnerUserId,
           results: completion.results,
         }),
-      }),
+      }).then(() => undefined),
 
     deleteAbandonedWaitingRoom,
+    persistReady,
   },
 
   onBroadcast: (roomCode, snapshot) => {
@@ -101,82 +240,204 @@ const roomManager = new RoomManager({
   onLifecycleFailure: reportLifecycleFailure,
 });
 
-io.on("connection", (socket) => {
-  const parsed = z
-    .object({
-      roomCode: z.string().min(1),
-      userId: z.string().uuid(),
-      displayName: z.string().min(1).max(50),
-      spectator: z.enum(["true", "false"]).default("false"),
-      host: z.enum(["true", "false"]).default("false"),
-    })
-    .safeParse(socket.handshake.auth);
+const socketsByUser = new Map<string, Set<Socket>>();
 
-  if (!parsed.success) {
+function trackSocket(userId: string, socket: Socket): void {
+  let set = socketsByUser.get(userId);
+  if (!set) {
+    set = new Set();
+    socketsByUser.set(userId, set);
+  }
+  set.add(socket);
+  metrics.set(
+    "game_players_connected",
+    [...socketsByUser.values()].reduce((n, s) => n + s.size, 0),
+  );
+}
+
+function untrackSocket(userId: string, socket: Socket): void {
+  const set = socketsByUser.get(userId);
+  if (!set) return;
+  set.delete(socket);
+  if (set.size === 0) socketsByUser.delete(userId);
+  metrics.set(
+    "game_players_connected",
+    [...socketsByUser.values()].reduce((n, s) => n + s.size, 0),
+  );
+}
+
+setInterval(() => {
+  metrics.set("game_rooms_active", roomManager.roomCount());
+}, 5_000).unref();
+
+type VerifiedIdentity = {
+  userId: string;
+  displayName: string;
+  spectator: boolean;
+  host: boolean;
+  muted: boolean;
+};
+
+async function verifyHandshake(
+  roomCode: string,
+  token: unknown,
+): Promise<VerifiedIdentity | null> {
+  const parsed = z.string().min(20).safeParse(token);
+  if (!parsed.success) return null;
+
+  try {
+    const response = await gameApi("/internal/socket/verify", {
+      method: "POST",
+      body: JSON.stringify({ token: parsed.data, roomCode }),
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as VerifiedIdentity;
+  } catch {
+    return null;
+  }
+}
+
+io.on("connection", (socket) => {
+  const roomCode = z.string().min(1).max(6).safeParse(
+    (socket.handshake.auth as Record<string, unknown>).roomCode,
+  );
+
+  if (!roomCode.success) {
     socket.disconnect(true);
     return;
   }
 
-  const { roomCode, userId, displayName, spectator, host } = parsed.data;
+  const token = (socket.handshake.auth as Record<string, unknown>).token;
 
-  socket.join(roomCode);
-
-  roomManager.connect(roomCode, {
-    userId,
-    displayName,
-    spectator: spectator === "true",
-    host: host === "true",
-    socketId: socket.id,
-  });
-
-  socket.on("request_snapshot", () => {
-    const snapshot = roomManager.getSnapshot(roomCode);
-
-    if (snapshot) {
-      socket.emit("server_event", snapshot);
-    }
-  });
-
-  socket.on("client_event", (raw: unknown) => {
-    const event = clientEventSchema.safeParse(raw);
-
-    if (!event.success) {
+  void (async () => {
+    const identity = await verifyHandshake(roomCode.data, token);
+    if (!identity) {
+      metrics.increment("game_handshake_rejections_total");
+      socket.emit("auth_error", { error: "handshake_rejected" });
+      socket.disconnect(true);
       return;
     }
 
-    if (event.data.type === "input") {
-      roomManager.move(roomCode, userId, event.data.direction);
-      return;
-    }
-
-    io.to(roomCode).emit("chat_event", {
-      from: displayName,
-      text: event.data.text,
-      at: Date.now(),
+    const { userId, displayName, spectator, host } = identity;
+    log("info", "socket_verified", {
+      roomCode: roomCode.data,
+      userId,
+      spectator,
     });
-  });
+    metrics.increment("game_socket_connects_total");
 
-  socket.on("start_match", () => {
-    roomManager.startMatch(roomCode, userId);
-  });
+    socket.join(roomCode.data);
+    trackSocket(userId, socket);
 
-  socket.on("restart_match", () => {
-    roomManager.restartMatch(roomCode, userId);
-  });
+    roomManager.connect(roomCode.data, {
+      userId,
+      displayName,
+      spectator,
+      host,
+      socketId: socket.id,
+    });
 
-  socket.on("disconnect", () => {
-    roomManager.disconnect(roomCode, userId);
-  });
+    socket.on("request_snapshot", () => {
+      const snapshot = roomManager.getSnapshot(roomCode.data);
+
+      if (snapshot) {
+        socket.emit("server_event", snapshot);
+      }
+    });
+
+    // Per-socket gameplay input throttle: 40 inputs per rolling second.
+    let inputWindowStart = Date.now();
+    let inputCount = 0;
+
+    socket.on("client_event", (raw: unknown) => {
+      const event = clientEventSchema.safeParse(raw);
+
+      if (!event.success) {
+        metrics.increment("game_inputs_rejected_total");
+        return;
+      }
+
+      if (event.data.type === "input") {
+        if (event.data.direction === "none") return;
+        const now = Date.now();
+        if (now - inputWindowStart >= 1_000) {
+          inputWindowStart = now;
+          inputCount = 0;
+        }
+        inputCount += 1;
+        if (inputCount > 40) {
+          metrics.increment("game_inputs_rejected_total");
+          return;
+        }
+        roomManager.move(roomCode.data, userId, event.data.direction);
+        return;
+      }
+
+      if (event.data.type === "ready") {
+        // Readiness is server-validated (spectators/mid-match are ignored)
+        // and mirrored into durable membership via the internal API.
+        roomManager.setReady(roomCode.data, userId, event.data.ready);
+        return;
+      }
+
+      // Chat is broadcast-only; durable history is written via the HTTP API.
+      const chatText = event.data.text;
+      const broadcastChat = (): void => {
+        io.to(roomCode.data).emit("chat_event", {
+          from: displayName,
+          text: chatText,
+          at: Date.now(),
+        });
+      };
+      if (identity.muted) {
+        metrics.increment("game_chat_rejected_total");
+        return;
+      }
+      if (!isChatAllowed(chatText, bannedWords)) {
+        metrics.increment("game_chat_rejected_total");
+        return;
+      }
+      const redisClient = rateLimitRedis;
+      if (redisClient) {
+        const key = `rl:chat-socket:${userId}`;
+        void (async () => {
+          try {
+            const count = await redisClient.incr(key);
+            if (count === 1) {
+              await redisClient.pExpire(key, 10_000);
+            }
+            if (count > 5) {
+              metrics.increment("game_chat_rejected_total");
+              return;
+            }
+            broadcastChat();
+          } catch {
+            // Redis unavailable: fall back to broadcast without limit.
+            broadcastChat();
+          }
+        })();
+        return;
+      }
+      broadcastChat();
+    });
+
+    socket.on("start_match", () => {
+      roomManager.startMatch(roomCode.data, userId);
+    });
+
+    socket.on("restart_match", () => {
+      roomManager.restartMatch(roomCode.data, userId);
+    });
+
+    socket.on("disconnect", () => {
+      untrackSocket(userId, socket);
+      roomManager.disconnect(roomCode.data, userId);
+    });
+  })();
 });
 
 function shutdown(signal: string): void {
-  console.info(
-    JSON.stringify({
-      level: "info",
-      event: "game_server_shutdown",
-      signal,
-    }),
-  );
+  log("info", "game_server_shutdown", { signal });
 
   roomManager.dispose();
 
@@ -190,12 +451,6 @@ function shutdown(signal: string): void {
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-http.listen(port, "0.0.0.0", () => {
-  console.info(
-    JSON.stringify({
-      level: "info",
-      event: "game_server_listening",
-      port,
-    }),
-  );
+http.listen(env.GAME_PORT, "0.0.0.0", () => {
+  log("info", "game_server_listening", { port: env.GAME_PORT });
 });

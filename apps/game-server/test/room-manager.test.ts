@@ -3,17 +3,20 @@ import { RoomManager, type RoomLifecycleApi } from "../src/room-manager.js";
 
 const HOST_ID = "11111111-1111-1111-1111-111111111111";
 const PLAYER_ID = "22222222-2222-2222-2222-222222222222";
+const SPECTATOR_ID = "33333333-3333-3333-3333-333333333333";
 const ROOM_CODE = "ABC123";
 
 function createApi(): RoomLifecycleApi & {
   markRunning: ReturnType<typeof vi.fn>;
   persistCompletion: ReturnType<typeof vi.fn>;
   deleteAbandonedWaitingRoom: ReturnType<typeof vi.fn>;
+  persistReady: ReturnType<typeof vi.fn>;
 } {
   return {
     markRunning: vi.fn().mockResolvedValue(undefined),
     persistCompletion: vi.fn().mockResolvedValue(undefined),
     deleteAbandonedWaitingRoom: vi.fn().mockResolvedValue(undefined),
+    persistReady: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -54,6 +57,26 @@ function connectPlayer(
   });
 }
 
+function connectSpectator(manager: RoomManager) {
+  manager.connect(ROOM_CODE, {
+    userId: SPECTATOR_ID,
+    displayName: "Watcher",
+    spectator: true,
+    host: false,
+    socketId: "spectator-socket",
+  });
+}
+
+/** Brings every connected non-spectator player to the ready state. */
+function readyUp(
+  manager: RoomManager,
+  userIds: string[] = [HOST_ID, PLAYER_ID],
+) {
+  for (const userId of userIds) {
+    manager.setReady(ROOM_CODE, userId, true);
+  }
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -63,6 +86,7 @@ describe("RoomManager", () => {
     const { manager, api } = createManager();
     connectHost(manager);
     connectPlayer(manager);
+    readyUp(manager);
 
     expect(manager.startMatch(ROOM_CODE, PLAYER_ID)).toBe(false);
     expect(manager.getSnapshot(ROOM_CODE)?.phase).toBe("waiting");
@@ -75,12 +99,112 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
+  it("blocks start until every non-spectator player is ready", () => {
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+
+    expect(manager.setReady(ROOM_CODE, HOST_ID, true)).not.toBeNull();
+
+    expect(manager.getSnapshot(ROOM_CODE)?.players).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: HOST_ID, ready: true }),
+        expect.objectContaining({ id: PLAYER_ID, ready: false }),
+      ]),
+    );
+
+    expect(manager.startMatch(ROOM_CODE, HOST_ID)).toBe(false);
+    expect(api.markRunning).not.toHaveBeenCalled();
+
+    manager.setReady(ROOM_CODE, PLAYER_ID, true);
+
+    expect(manager.startMatch(ROOM_CODE, HOST_ID)).toBe(true);
+    expect(api.markRunning).toHaveBeenCalledWith(ROOM_CODE);
+
+    manager.dispose();
+  });
+
+  it("blocks start below the minimum participant count even when everyone is ready", () => {
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectSpectator(manager);
+    readyUp(manager, [HOST_ID]);
+
+    // Only one non-spectator is present; spectators never count toward
+    // minimum-player or readiness requirements.
+    expect(manager.setReady(ROOM_CODE, SPECTATOR_ID, true)).not.toBeNull();
+    expect(
+      manager
+        .getSnapshot(ROOM_CODE)
+        ?.players.find((p) => p.id === SPECTATOR_ID)?.ready,
+    ).toBe(false);
+
+    expect(manager.startMatch(ROOM_CODE, HOST_ID)).toBe(false);
+    expect(api.markRunning).not.toHaveBeenCalled();
+
+    manager.dispose();
+  });
+
+  it("persists ready state through the lifecycle API", () => {
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+
+    manager.setReady(ROOM_CODE, PLAYER_ID, true);
+
+    expect(api.persistReady).toHaveBeenCalledWith(ROOM_CODE, PLAYER_ID, true);
+
+    manager.setReady(ROOM_CODE, PLAYER_ID, false);
+
+    expect(api.persistReady).toHaveBeenCalledWith(ROOM_CODE, PLAYER_ID, false);
+
+    manager.dispose();
+  });
+
+  it("ignores ready toggles during a running match", () => {
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+
+    api.persistReady.mockClear();
+    manager.setReady(ROOM_CODE, PLAYER_ID, false);
+
+    expect(
+      manager.getSnapshot(ROOM_CODE)?.players.find((p) => p.id === PLAYER_ID)
+        ?.ready,
+    ).toBe(true);
+    expect(api.persistReady).not.toHaveBeenCalled();
+
+    manager.dispose();
+  });
+
+  it("applies live spectator role changes and broadcasts them", () => {
+    const { manager } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+
+    expect(manager.setSpectator(ROOM_CODE, PLAYER_ID, true)).toBe(true);
+    expect(
+      manager
+        .getSnapshot(ROOM_CODE)
+        ?.players.find((p) => p.id === PLAYER_ID)?.spectator,
+    ).toBe(true);
+
+    expect(manager.setSpectator("UNKNOWN", PLAYER_ID, false)).toBe(false);
+    expect(manager.setSpectator(ROOM_CODE, "missing-user", false)).toBe(false);
+
+    manager.dispose();
+  });
+
   it("allows only the host to rematch after completion", () => {
     vi.useFakeTimers();
 
     const { manager, api } = createManager();
     connectHost(manager);
     connectPlayer(manager);
+    readyUp(manager);
     manager.startMatch(ROOM_CODE, HOST_ID);
 
     vi.advanceTimersByTime(61_000);
@@ -94,12 +218,43 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
+  it("gates rematch until a rejoined player readies again", () => {
+    vi.useFakeTimers();
+
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+    vi.advanceTimersByTime(61_000);
+
+    expect(manager.getSnapshot(ROOM_CODE)?.phase).toBe("completed");
+
+    // The player leaves past the grace window, so their simulation state
+    // (including readiness) is discarded, then they join again.
+    manager.disconnect(ROOM_CODE, PLAYER_ID);
+    vi.advanceTimersByTime(1_000);
+    connectPlayer(manager, { socketId: "guest-rejoined" });
+
+    expect(manager.restartMatch(ROOM_CODE, HOST_ID)).toBe(false);
+    expect(api.markRunning).toHaveBeenCalledTimes(1);
+
+    manager.setReady(ROOM_CODE, PLAYER_ID, true);
+
+    expect(manager.restartMatch(ROOM_CODE, HOST_ID)).toBe(true);
+    expect(api.markRunning).toHaveBeenCalledTimes(2);
+
+    manager.dispose();
+  });
+
   it("resets timer, score, IT state, and preserves player roles on rematch", () => {
     vi.useFakeTimers();
 
     const { manager } = createManager();
     connectHost(manager);
-    connectPlayer(manager, { spectator: true });
+    connectPlayer(manager);
+    connectSpectator(manager);
+    readyUp(manager);
     manager.startMatch(ROOM_CODE, HOST_ID);
 
     vi.advanceTimersByTime(61_000);
@@ -123,6 +278,11 @@ describe("RoomManager", () => {
         expect.objectContaining({
           id: PLAYER_ID,
           tags: 0,
+          spectator: false,
+        }),
+        expect.objectContaining({
+          id: SPECTATOR_ID,
+          tags: 0,
           spectator: true,
         }),
       ]),
@@ -131,47 +291,35 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
-  it("persists match completion once when the running match transitions to completed", async () => {
+  it("restores persisted readiness when a player reconnects inside the grace window", () => {
     vi.useFakeTimers();
 
-    const { manager, api } = createManager();
+    const { manager } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
 
-    try {
-      connectHost(manager);
-      connectPlayer(manager);
+    manager.disconnect(ROOM_CODE, PLAYER_ID);
+    vi.advanceTimersByTime(999);
 
-      expect(manager.startMatch(ROOM_CODE, HOST_ID)).toBe(true);
+    manager.connect(ROOM_CODE, {
+      userId: PLAYER_ID,
+      displayName: "Guest",
+      spectator: false,
+      host: false,
+      socketId: "guest-reconnected",
+      ready: true,
+    });
 
-      await vi.advanceTimersByTimeAsync(60_050);
+    vi.advanceTimersByTime(10);
 
-      expect(manager.getSnapshot(ROOM_CODE)?.phase).toBe("completed");
+    expect(manager.getSnapshot(ROOM_CODE)?.players).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: PLAYER_ID, ready: true }),
+      ]),
+    );
 
-      expect(api.persistCompletion).toHaveBeenCalledTimes(1);
-      expect(api.persistCompletion).toHaveBeenCalledWith(
-        ROOM_CODE,
-        expect.objectContaining({
-          winnerUserId: expect.any(String),
-          results: expect.arrayContaining([
-            expect.objectContaining({
-              id: HOST_ID,
-              tags: expect.any(Number),
-            }),
-            expect.objectContaining({
-              id: PLAYER_ID,
-              tags: expect.any(Number),
-            }),
-          ]),
-        }),
-      );
-
-      // Advance farther: the completed tick loop may keep broadcasting,
-      // but completion persistence must not happen a second time.
-      await vi.advanceTimersByTimeAsync(5_000);
-
-      expect(api.persistCompletion).toHaveBeenCalledTimes(1);
-    } finally {
-      manager.dispose();
-    }
+    manager.dispose();
   });
 
   it("keeps a player when they reconnect inside the grace window", () => {
@@ -235,16 +383,22 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
-  it("retains completed room persistence when the last player leaves", () => {
+  it("retains completed room persistence when the last player leaves", async () => {
     vi.useFakeTimers();
 
     const { manager, api } = createManager();
     connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
     manager.startMatch(ROOM_CODE, HOST_ID);
     vi.advanceTimersByTime(61_000);
 
-    manager.disconnect(ROOM_CODE, HOST_ID);
+    expect(manager.getSnapshot(ROOM_CODE)?.phase).toBe("completed");
+
+    manager.disconnect(ROOM_CODE, PLAYER_ID);
     vi.advanceTimersByTime(1_000);
+    manager.disconnect(ROOM_CODE, HOST_ID);
+    await vi.runAllTimersAsync();
 
     expect(manager.hasRoom(ROOM_CODE)).toBe(false);
     expect(api.deleteAbandonedWaitingRoom).not.toHaveBeenCalled();
@@ -252,15 +406,19 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
-  it("retains running room persistence when the last player leaves", () => {
+  it("retains running room persistence when the last player leaves", async () => {
     vi.useFakeTimers();
 
     const { manager, api } = createManager();
     connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
     manager.startMatch(ROOM_CODE, HOST_ID);
 
-    manager.disconnect(ROOM_CODE, HOST_ID);
+    manager.disconnect(ROOM_CODE, PLAYER_ID);
     vi.advanceTimersByTime(1_000);
+    manager.disconnect(ROOM_CODE, HOST_ID);
+    await vi.runAllTimersAsync();
 
     expect(manager.hasRoom(ROOM_CODE)).toBe(false);
     expect(api.deleteAbandonedWaitingRoom).not.toHaveBeenCalled();

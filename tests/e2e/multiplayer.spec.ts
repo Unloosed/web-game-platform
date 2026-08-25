@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-test("two users create and join a room", async ({ browser }) => {
+test("two users ready up, start a match, and see each other", async ({
+  browser,
+}) => {
   const host = await browser.newPage();
   const guest = await browser.newPage();
 
@@ -32,7 +34,20 @@ test("two users create and join a room", async ({ browser }) => {
 
   await expect(guest.getByText(`Room: Test Arena (${code})`)).toBeVisible();
 
-  await host.getByRole("button", { name: "Start match" }).click();
+  // Match startup is deterministic: the host cannot start until every
+  // non-spectator participant has explicitly readied up.
+  await expect(host.getByTestId("start-match")).toBeDisabled();
+
+  await host.getByTestId("ready-toggle").click();
+  await expect(host.getByTestId("readiness")).toContainText("1/2");
+
+  await guest.getByTestId("ready-toggle").click();
+  await expect(host.getByTestId("readiness")).toContainText("2/2");
+  await expect(guest.getByTestId("readiness")).toContainText("2/2");
+
+  const startButton = host.getByTestId("start-match");
+  await expect(startButton).toBeEnabled();
+  await startButton.click();
   await host.keyboard.press("ArrowRight");
 
   await expect(host.getByTestId("scoreboard")).toContainText("Host");

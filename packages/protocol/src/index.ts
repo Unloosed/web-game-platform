@@ -9,7 +9,15 @@ export const chatSchema = z.object({
   type: z.literal("chat"),
   text: z.string().trim().min(1).max(500),
 });
-export const clientEventSchema = z.union([inputSchema, chatSchema]);
+export const readySchema = z.object({
+  type: z.literal("ready"),
+  ready: z.boolean(),
+});
+export const clientEventSchema = z.union([
+  inputSchema,
+  chatSchema,
+  readySchema,
+]);
 export type Direction = z.infer<typeof directionSchema>;
 export type ClientEvent = z.infer<typeof clientEventSchema>;
 export type Player = {
@@ -20,6 +28,7 @@ export type Player = {
   color: string;
   tags: number;
   spectator: boolean;
+  ready: boolean;
 };
 export type Snapshot = {
   type: "snapshot";

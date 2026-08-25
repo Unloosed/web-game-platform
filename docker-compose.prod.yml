@@ -1,0 +1,81 @@
+# Production-style stack for container platforms. Configure via a .env
+# file or exported environment variables before `docker compose -f
+# docker-compose.prod.yml up -d`. See docs/deployment.md.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-webgame}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-webgame}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres-init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-webgame}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-webgame}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-webgame}
+      REDIS_URL: redis://redis:6379
+      PORT: "4000"
+      CORS_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      GAME_SERVER_SECRET: ${GAME_SERVER_SECRET:?set GAME_SERVER_SECRET}
+      GAME_SERVER_URL: http://game-server:4100
+      NODE_ENV: production
+      TRUST_PROXY: "true"
+      MODERATION_BANNED_WORDS: ${MODERATION_BANNED_WORDS:-spam,scam}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-4000}:4000"
+
+  game-server:
+    build:
+      context: .
+      dockerfile: infra/game-server.Dockerfile
+    environment:
+      GAME_PORT: "4100"
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      API_URL: http://api:4000
+      GAME_SERVER_SECRET: ${GAME_SERVER_SECRET:?set GAME_SERVER_SECRET}
+      NODE_ENV: production
+    depends_on:
+      - api
+    ports:
+      - "${GAME_PORT:-4100}:4100"
+
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+        VITE_GAME_URL: ${PUBLIC_GAME_URL:-http://localhost:4100}
+    ports:
+      - "${WEB_PORT:-5173}:80"
+
+volumes:
+  postgres-data: {}
+  redis-data: {}
