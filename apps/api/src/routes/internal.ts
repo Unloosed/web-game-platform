@@ -62,7 +62,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     const { code } = request.params as { code: string };
     const body = z
       .object({
-        status: z.enum(["waiting", "running", "completed"]),
+        status: z.enum(["waiting", "running", "completed", "archived"]),
         results: z
           .array(
             z.object({

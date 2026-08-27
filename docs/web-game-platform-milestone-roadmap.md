@@ -200,7 +200,7 @@ Repair the boundary between persistent room lifecycle and in-memory realtime lif
 - **Server-authorized spectators**: role resolved at handshake from durable membership; gameplay input from spectators is rejected by game rules regardless of client behavior; mid-session role changes propagate from the API to the live session (`POST /internal/users/:id/spectator`); spectators never count toward capacity or ready requirements and cannot hold the IT role.
 - **Deterministic match startup**: rooms begin in `waiting`; movement and scoring only occur while `running`; host authorization, phase, participant count, and readiness are validated before any transition.
 - **Idempotent completion**: a single source-side phase-transition guard plus a database-side existing-match guard ensure repeated ticks or snapshots cannot create multiple result records. The legacy HTTP complete route shares the same guard.
-- **Empty-room cleanup**: never-joined waiting rooms are removed by an API TTL sweeper (`EMPTY_ROOM_TTL_MS`) and immediately by the game server when the last occupant of a waiting room leaves; running/completed rooms are retained through grace and for results.
+- **Empty-room cleanup**: never-joined waiting rooms are removed by an API TTL sweeper (`EMPTY_ROOM_TTL_MS`) and immediately by the game server when the last occupant of a waiting room leaves; running rooms are retained through reconnect grace and archived once abandoned (an abandoned match can never complete), completed rooms are retained for results.
 
 ## Target lifecycle
 

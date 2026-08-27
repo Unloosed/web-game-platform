@@ -10,12 +10,14 @@ function createApi(): RoomLifecycleApi & {
   markRunning: ReturnType<typeof vi.fn>;
   persistCompletion: ReturnType<typeof vi.fn>;
   deleteAbandonedWaitingRoom: ReturnType<typeof vi.fn>;
+  archiveAbandonedRoom: ReturnType<typeof vi.fn>;
   persistReady: ReturnType<typeof vi.fn>;
 } {
   return {
     markRunning: vi.fn().mockResolvedValue(undefined),
     persistCompletion: vi.fn().mockResolvedValue(undefined),
     deleteAbandonedWaitingRoom: vi.fn().mockResolvedValue(undefined),
+    archiveAbandonedRoom: vi.fn().mockResolvedValue(undefined),
     persistReady: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -455,11 +457,12 @@ describe("RoomManager", () => {
 
     expect(manager.hasRoom(ROOM_CODE)).toBe(false);
     expect(api.deleteAbandonedWaitingRoom).not.toHaveBeenCalled();
+    expect(api.archiveAbandonedRoom).not.toHaveBeenCalled();
 
     manager.dispose();
   });
 
-  it("retains running room persistence when the last player leaves", async () => {
+  it("archives a running room when the last player leaves past grace", async () => {
     vi.useFakeTimers();
 
     const { manager, api } = createManager();
@@ -473,8 +476,31 @@ describe("RoomManager", () => {
     manager.disconnect(ROOM_CODE, HOST_ID);
     await vi.runAllTimersAsync();
 
+    // An abandoned running match can never complete, so the room must not
+    // linger as "running": it is archived instead.
     expect(manager.hasRoom(ROOM_CODE)).toBe(false);
+    expect(api.archiveAbandonedRoom).toHaveBeenCalledWith(ROOM_CODE);
     expect(api.deleteAbandonedWaitingRoom).not.toHaveBeenCalled();
+
+    manager.dispose();
+  });
+
+  it("archives a running room when a kick removes the last player", () => {
+    vi.useFakeTimers();
+
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+
+    manager.kick(ROOM_CODE, HOST_ID);
+    expect(manager.hasRoom(ROOM_CODE)).toBe(true);
+    expect(api.archiveAbandonedRoom).not.toHaveBeenCalled();
+
+    manager.kick(ROOM_CODE, PLAYER_ID);
+    expect(manager.hasRoom(ROOM_CODE)).toBe(false);
+    expect(api.archiveAbandonedRoom).toHaveBeenCalledWith(ROOM_CODE);
 
     manager.dispose();
   });

@@ -23,6 +23,8 @@ export type RoomLifecycleApi = {
     },
   ): Promise<void>;
   deleteAbandonedWaitingRoom(roomCode: string): Promise<void>;
+  /** Archives a running room abandoned by all of its players. */
+  archiveAbandonedRoom(roomCode: string): Promise<void>;
   persistReady(
     roomCode: string,
     userId: string,
@@ -138,20 +140,7 @@ export class RoomManager {
       };
 
       if (Object.keys(current.state.players).length === 0) {
-        clearInterval(current.timer);
-        this.rooms.delete(roomCode);
-
-        if (current.state.phase === "waiting") {
-          void this.options.api
-            .deleteAbandonedWaitingRoom(roomCode)
-            .catch((error) => {
-              this.options.onLifecycleFailure?.(
-                "delete_abandoned_waiting_room",
-                error,
-              );
-            });
-        }
-
+        this.discardRoom(roomCode, current);
         return;
       }
 
@@ -268,8 +257,7 @@ export class RoomManager {
     };
 
     if (Object.keys(remainingPlayers).length === 0) {
-      clearInterval(room.timer);
-      this.rooms.delete(roomCode);
+      this.discardRoom(roomCode, room);
       return true;
     }
 
@@ -296,6 +284,35 @@ export class RoomManager {
     }
     this.rooms.clear();
     this.pendingRemoval.clear();
+  }
+
+  /**
+   * Stops the loop and drops the live room. Abandonment is persisted by
+   * phase: an empty waiting room is deleted, an abandoned running room is
+   * archived (it can never complete without players), a completed room is
+   * kept for its durable results.
+   */
+  private discardRoom(roomCode: string, room: RoomInstance): void {
+    clearInterval(room.timer);
+    this.rooms.delete(roomCode);
+
+    if (room.state.phase === "waiting") {
+      void this.options.api
+        .deleteAbandonedWaitingRoom(roomCode)
+        .catch((error) => {
+          this.options.onLifecycleFailure?.(
+            "delete_abandoned_waiting_room",
+            error,
+          );
+        });
+    } else if (room.state.phase === "running") {
+      void this.options.api.archiveAbandonedRoom(roomCode).catch((error) => {
+        this.options.onLifecycleFailure?.(
+          "archive_abandoned_running_room",
+          error,
+        );
+      });
+    }
   }
 
   private getOrCreateRoom(roomCode: string): RoomInstance {

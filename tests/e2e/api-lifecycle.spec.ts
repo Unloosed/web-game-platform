@@ -20,7 +20,7 @@ type Room = {
   id: string;
   code: string;
   name: string;
-  status: "waiting" | "running" | "completed";
+  status: "waiting" | "running" | "completed" | "archived";
   hostUserId: string;
 };
 
@@ -227,6 +227,42 @@ test.describe("Milestone 3/3.1 API behavior", () => {
       );
       const persisted = (await roomResponse.json()) as { room: Room };
       expect(persisted.room.status).toBe("running");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("archives a room through authenticated game-server calls", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+
+    try {
+      await login(context.request, `host-${Date.now()}`);
+      const room = await createRoom(context.request, "Archive persistence");
+
+      const archiveResponse = await context.request.post(
+        `${API_URL}/internal/rooms/${room.code}/lifecycle`,
+        {
+          headers: {
+            "x-game-server-secret": GAME_SERVER_SECRET!,
+          },
+          data: { status: "archived" },
+        },
+      );
+      expect(archiveResponse.ok()).toBeTruthy();
+
+      const roomResponse = await context.request.get(
+        `${API_URL}/rooms/${room.code}`,
+      );
+      const persisted = (await roomResponse.json()) as { room: Room };
+      expect(persisted.room.status).toBe("archived");
+
+      // Archived rooms are closed for (re)joining.
+      const joinResponse = await context.request.post(`${API_URL}/rooms/join`, {
+        data: { code: room.code, spectator: false },
+      });
+      expect(joinResponse.status()).toBe(409);
     } finally {
       await context.close();
     }

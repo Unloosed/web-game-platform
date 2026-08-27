@@ -295,6 +295,12 @@ const roomManager = new RoomManager({
 
     deleteAbandonedWaitingRoom,
     persistReady,
+
+    archiveAbandonedRoom: (roomCode) =>
+      gameApi(`/internal/rooms/${encodeURIComponent(roomCode)}/lifecycle`, {
+        method: "POST",
+        body: JSON.stringify({ status: "archived" }),
+      }).then(() => undefined),
   },
 
   onBroadcast: (roomCode, snapshot) => {
