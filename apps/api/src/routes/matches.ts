@@ -28,6 +28,24 @@ export async function matchRoutes(app: FastifyInstance): Promise<void> {
     return { matches: history.rows };
   });
 
+  app.get("/users/:id/achievements", async (req) => {
+    const userId = (req.params as any).id;
+    const rows = await db.query(
+      `
+      select
+        a.code,
+        a.match_id as "matchId",
+        a.granted_at as "grantedAt"
+      from achievements a
+      where a.user_id = $1
+      order by a.granted_at desc
+      limit 100
+    `,
+      [userId],
+    );
+    return { achievements: rows.rows };
+  });
+
   app.get("/leaderboard", async () => {
     const board = await db.query(
       `

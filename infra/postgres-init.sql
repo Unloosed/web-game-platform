@@ -7,6 +7,10 @@ CREATE TABLE chat_messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), room_
 CREATE TABLE matches (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), room_id uuid NOT NULL REFERENCES rooms(id), winner_user_id uuid REFERENCES users(id), started_at timestamptz NOT NULL, ended_at timestamptz, results jsonb NOT NULL DEFAULT '[]'::jsonb);
 CREATE TABLE match_players (match_id uuid NOT NULL REFERENCES matches(id) ON DELETE CASCADE, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, tags integer NOT NULL DEFAULT 0, PRIMARY KEY(match_id,user_id));
 CREATE TABLE audit_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_user_id uuid NOT NULL REFERENCES users(id), action varchar(64) NOT NULL, target_type varchar(32) NOT NULL, target_id varchar(64) NOT NULL, details jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE achievements (user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, code varchar(64) NOT NULL, match_id uuid REFERENCES matches(id) ON DELETE SET NULL, granted_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(user_id, code));
+CREATE TABLE reports (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), reporter_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, target_user_id uuid REFERENCES users(id) ON DELETE SET NULL, chat_message_id uuid REFERENCES chat_messages(id) ON DELETE SET NULL, room_code varchar(6), reason varchar(500) NOT NULL, status varchar(16) NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','dismissed')), resolved_by uuid REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX match_players_user_idx ON match_players(user_id);
 CREATE INDEX matches_room_idx ON matches(room_id);
 CREATE INDEX audit_log_created_idx ON audit_log(created_at DESC);
+CREATE INDEX achievements_user_idx ON achievements(user_id);
+CREATE INDEX reports_status_idx ON reports(status, created_at DESC);

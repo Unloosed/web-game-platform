@@ -3,7 +3,7 @@ import { Server, type Socket } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { createClient } from "redis";
 import { z } from "zod";
-import { clientEventSchema } from "../../../packages/protocol/src/index.js";
+import { clientEventSchema, PROTOCOL_VERSION } from "../../../packages/protocol/src/index.js";
 import {
   isChatAllowed,
   MetricsRegistry,
@@ -18,6 +18,8 @@ const env = z
     REDIS_URL: z.string().optional(),
     ROOM_RECONNECT_GRACE_MS: z.coerce.number().default(15_000),
     GAME_MATCH_MS: z.coerce.number().int().positive().default(60_000),
+    MAX_SOCKETS_PER_USER: z.coerce.number().int().positive().default(4),
+    MAX_SOCKETS_PER_IP: z.coerce.number().int().positive().default(16),
     API_URL: z.string().default("http://localhost:4000"),
     GAME_SERVER_SECRET: z
       .string()
@@ -31,11 +33,17 @@ const bannedWords = parseBannedWords(env.MODERATION_BANNED_WORDS);
 const metrics = new MetricsRegistry();
 metrics.gauge("game_rooms_active", "Rooms with a live simulation");
 metrics.gauge("game_players_connected", "Users with a live socket");
+metrics.gauge("game_matches_active", "Rooms with a match currently running");
+metrics.gauge("game_tick_latency_ms", "Wall-clock cost of the most recent simulation tick");
 metrics.counter("game_socket_connects_total", "Verified socket connections");
 metrics.counter("game_handshake_rejections_total", "Handshakes rejected by auth", );
+metrics.counter("game_protocol_rejections_total", "Handshakes rejected by protocol version mismatch");
+metrics.counter("game_connection_quota_rejections_total", "Connections rejected by per-user or per-IP quotas");
 metrics.counter("game_inputs_rejected_total", "Gameplay inputs rejected by rate limit or phase");
 metrics.counter("game_chat_rejected_total", "Chat messages rejected by rate limit or moderation");
 metrics.counter("game_matches_completed_total", "Matches that reached completion");
+metrics.counter("game_snapshots_total", "Room snapshots broadcast");
+metrics.counter("game_lifecycle_failures_total", "Lifecycle persistence calls that failed");
 
 const log = (level: string, event: string, fields: Record<string, unknown> = {}) =>
   console.log(JSON.stringify({ level, event, ...fields }));
@@ -89,6 +97,7 @@ function persistReady(
 }
 
 function reportLifecycleFailure(operation: string, error: unknown): void {
+  metrics.increment("game_lifecycle_failures_total");
   log("error", "lifecycle_failure", {
     operation,
     error: error instanceof Error ? error.message : String(error),
@@ -176,6 +185,34 @@ const http = createServer(async (req, res) => {
       return;
     }
 
+    // Room-scoped moderation kick: removes the player immediately (no
+    // reconnect grace) and drops their sockets bound to this room.
+    if (
+      req.method === "POST" &&
+      /^\/internal\/rooms\/[^/]+\/kick$/.test(url.pathname)
+    ) {
+      const code = decodeURIComponent(url.pathname.split("/")[3]);
+      try {
+        const body = z
+          .object({ userId: z.string().uuid() })
+          .parse(await readJson(req));
+
+        roomManager.kick(code, body.userId);
+        for (const socket of socketsByUser.get(body.userId) ?? []) {
+          if (socket.data.roomCode === code) {
+            socket.disconnect(true);
+          }
+        }
+        log("info", "internal_kick", { roomCode: code, userId: body.userId });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"ok":true}');
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end('{"error":"invalid_kick_request"}');
+      }
+      return;
+    }
+
     res.writeHead(404, { "content-type": "application/json" });
     res.end('{"error":"not_found"}');
     return;
@@ -234,13 +271,19 @@ const roomManager = new RoomManager({
   },
 
   onBroadcast: (roomCode, snapshot) => {
+    metrics.increment("game_snapshots_total");
     io.to(roomCode).emit("server_event", snapshot);
   },
 
   onLifecycleFailure: reportLifecycleFailure,
+
+  onTickSample: (tickDurationMs) => {
+    metrics.set("game_tick_latency_ms", Math.round(tickDurationMs * 100) / 100);
+  },
 });
 
 const socketsByUser = new Map<string, Set<Socket>>();
+const socketsByIp = new Map<string, Set<Socket>>();
 
 function trackSocket(userId: string, socket: Socket): void {
   let set = socketsByUser.get(userId);
@@ -266,8 +309,25 @@ function untrackSocket(userId: string, socket: Socket): void {
   );
 }
 
+function trackIp(ip: string, socket: Socket): void {
+  let set = socketsByIp.get(ip);
+  if (!set) {
+    set = new Set();
+    socketsByIp.set(ip, set);
+  }
+  set.add(socket);
+}
+
+function untrackIp(ip: string, socket: Socket): void {
+  const set = socketsByIp.get(ip);
+  if (!set) return;
+  set.delete(socket);
+  if (set.size === 0) socketsByIp.delete(ip);
+}
+
 setInterval(() => {
   metrics.set("game_rooms_active", roomManager.roomCount());
+  metrics.set("game_matches_active", roomManager.activeMatchCount());
 }, 5_000).unref();
 
 type VerifiedIdentity = {
@@ -298,16 +358,26 @@ async function verifyHandshake(
 }
 
 io.on("connection", (socket) => {
-  const roomCode = z.string().min(1).max(6).safeParse(
-    (socket.handshake.auth as Record<string, unknown>).roomCode,
-  );
+  const auth = socket.handshake.auth as Record<string, unknown>;
+
+  const roomCode = z.string().min(1).max(6).safeParse(auth.roomCode);
 
   if (!roomCode.success) {
     socket.disconnect(true);
     return;
   }
 
-  const token = (socket.handshake.auth as Record<string, unknown>).token;
+  // Protocol-version gate: mismatched clients fail fast instead of
+  // misinterpreting snapshots or events.
+  if (auth.protocolVersion !== PROTOCOL_VERSION) {
+    metrics.increment("game_protocol_rejections_total");
+    metrics.increment("game_handshake_rejections_total");
+    socket.emit("auth_error", { error: "protocol_mismatch" });
+    socket.disconnect(true);
+    return;
+  }
+
+  const token = auth.token;
 
   void (async () => {
     const identity = await verifyHandshake(roomCode.data, token);
@@ -319,6 +389,20 @@ io.on("connection", (socket) => {
     }
 
     const { userId, displayName, spectator, host } = identity;
+
+    // Connection quotas per account and per IP bound abuse via reconnect
+    // storms or tab farms.
+    if (
+      (socketsByUser.get(userId)?.size ?? 0) >= env.MAX_SOCKETS_PER_USER ||
+      (socketsByIp.get(socket.handshake.address)?.size ?? 0) >=
+        env.MAX_SOCKETS_PER_IP
+    ) {
+      metrics.increment("game_connection_quota_rejections_total");
+      socket.emit("auth_error", { error: "connection_quota_exceeded" });
+      socket.disconnect(true);
+      return;
+    }
+
     log("info", "socket_verified", {
       roomCode: roomCode.data,
       userId,
@@ -326,8 +410,10 @@ io.on("connection", (socket) => {
     });
     metrics.increment("game_socket_connects_total");
 
+    socket.data.roomCode = roomCode.data;
     socket.join(roomCode.data);
     trackSocket(userId, socket);
+    trackIp(socket.handshake.address, socket);
 
     roomManager.connect(roomCode.data, {
       userId,
@@ -431,6 +517,7 @@ io.on("connection", (socket) => {
 
     socket.on("disconnect", () => {
       untrackSocket(userId, socket);
+      untrackIp(socket.handshake.address, socket);
       roomManager.disconnect(roomCode.data, userId);
     });
   })();

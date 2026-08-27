@@ -159,3 +159,47 @@ export function isChatAllowed(
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/**
+ * Achievement contract. Games/apps derive a MatchStats view from a completed
+ * match; evaluation is pure so it can be unit-tested and reused by any
+ * future game package without touching persistence.
+ */
+export type MatchStats = {
+  winnerUserId: string | null;
+  players: Array<{ userId: string; tags: number }>;
+};
+
+export type AchievementDefinition = {
+  code: string;
+  description: string;
+  evaluate(stats: MatchStats, userId: string): boolean;
+};
+
+export const ACHIEVEMENTS: AchievementDefinition[] = [
+  {
+    code: "first_match",
+    description: "Completed a match",
+    evaluate: () => true,
+  },
+  {
+    code: "first_win",
+    description: "Won a match",
+    evaluate: (stats, userId) => stats.winnerUserId === userId,
+  },
+  {
+    code: "sharpshooter",
+    description: "Tagged 5 or more players in a single match",
+    evaluate: (stats, userId) =>
+      (stats.players.find((p) => p.userId === userId)?.tags ?? 0) >= 5,
+  },
+];
+
+export function evaluateAchievements(
+  stats: MatchStats,
+  userId: string,
+): string[] {
+  return ACHIEVEMENTS.filter((a) => a.evaluate(stats, userId)).map(
+    (a) => a.code,
+  );
+}

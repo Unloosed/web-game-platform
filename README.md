@@ -1,6 +1,6 @@
-# Web Game Platform — Milestone 3/3.1
+# Web Game Platform — Milestone 4
 
-Milestone 3 (plus the 3.1 lifecycle repair) is a local, server-authoritative multiplayer tag arena: cookie-backed dev login, public/private invite-code lobbies, persistent membership/chat/matches, an authoritative 20 Hz room loop, scoring/tagging, match timer/results, ready-up gating before start, server-authorized spectator mode, reconnect-grace state retention, idempotent completion with rematch, Vitest tests, and Playwright suites.
+Milestones 3, 3.1 (lifecycle repair), and 4 (hardening) are complete: cookie-backed dev login, public/private invite-code lobbies, persistent membership/chat/matches, an authoritative 20 Hz room loop, scoring/tagging, match timer/results, ready-up gating before start, server-authorized spectator mode, reconnect-grace state retention, idempotent completion with rematch, achievements, moderation reports with admin review, room-scoped kicks, connection quotas, protocol-version handshake validation, CSRF origin policy, Prometheus metrics, Vitest tests, and Playwright suites.
 
 ## Run locally
 
@@ -30,4 +30,4 @@ E2E suites: `tests/e2e/multiplayer.spec.ts` (ready-up/start/movement), `tests/e2
 
 ## Scope notes
 
-Authentication is development-grade sign-in, but socket identity is no longer trusted from the client: the browser exchanges its session for a one-time token (`POST /auth/socket-token`) and the game-server verifies it server-side at handshake. Milestone 4 must add production OAuth/OIDC, Socket.IO Redis adapter rollout guidance beyond single-room sticky routing, payload/CSRF hardening defaults, and durable game-state persistence across restarts.
+Authentication is development-grade sign-in, but socket identity is no longer trusted from the client: the browser exchanges its session for a one-time token (`POST /auth/socket-token`) and the game-server verifies it server-side at handshake, alongside protocol-version and per-user/per-IP connection quotas. Milestone 5 (game registry/plugin architecture, second reference game) remains; production OAuth/OIDC and an OpenTelemetry trace SDK deployment are the main operational follow-ups beyond it.

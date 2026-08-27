@@ -19,6 +19,7 @@ export const metrics = new MetricsRegistry();
 metrics.counter("http_requests_total", "Total HTTP requests by method and status");
 metrics.counter("rate_limited_total", "Requests rejected by rate limiting");
 metrics.counter("moderation_rejected_total", "Chat messages rejected by moderation");
+metrics.counter("moderation_actions_total", "Admin/moderation actions performed");
 metrics.counter("socket_tokens_issued_total", "One-time socket tokens issued");
 metrics.counter("socket_identities_verified_total", "Socket handshakes verified against a session");
 

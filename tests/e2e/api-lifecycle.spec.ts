@@ -231,4 +231,113 @@ test.describe("Milestone 3/3.1 API behavior", () => {
       await context.close();
     }
   });
+
+  test("rejects state-changing requests from a hostile origin", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+
+    try {
+      await login(context.request, `csrf-${Date.now()}`);
+
+      const hostile = await context.request.post(`${API_URL}/rooms`, {
+        data: { name: "CSRF probe", isPrivate: true },
+        headers: { origin: "https://evil.example" },
+      });
+      expect(hostile.status()).toBe(403);
+
+      // Non-browser clients (no Origin header) remain allowed.
+      const headless = await context.request.post(`${API_URL}/rooms`, {
+        data: { name: "No-origin client", isPrivate: true },
+      });
+      expect(headless.status()).toBe(201);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("awards achievements once when a match completes", async ({
+    browser,
+  }) => {
+    const hostContext = await browser.newContext();
+    const guestContext = await browser.newContext();
+
+    try {
+      const host = await login(hostContext.request, `ach-host-${Date.now()}`);
+      const guest = await login(guestContext.request, `ach-guest-${Date.now()}`);
+      const room = await createRoom(hostContext.request, "Achievements");
+
+      const completion = await hostContext.request.post(
+        `${API_URL}/internal/rooms/${room.code}/lifecycle`,
+        {
+          headers: {
+            "x-game-server-secret": GAME_SERVER_SECRET!,
+          },
+          data: {
+            status: "completed",
+            winnerUserId: host.id,
+            results: [
+              { id: host.id, tags: 6 },
+              { id: guest.id, tags: 1 },
+            ],
+          },
+        },
+      );
+      expect(completion.ok()).toBeTruthy();
+
+      const hostAch = (await (
+        await hostContext.request.get(`${API_URL}/users/${host.id}/achievements`)
+      ).json()) as { achievements: Array<{ code: string }> };
+      expect(hostAch.achievements.map((a) => a.code)).toEqual(
+        expect.arrayContaining(["first_match", "first_win", "sharpshooter"]),
+      );
+
+      const guestAch = (await (
+        await guestContext.request.get(
+          `${API_URL}/users/${guest.id}/achievements`,
+        )
+      ).json()) as { achievements: Array<{ code: string }> };
+      expect(guestAch.achievements.map((a) => a.code)).toEqual([
+        "first_match",
+      ]);
+    } finally {
+      await hostContext.close();
+      await guestContext.close();
+    }
+  });
+
+  test("accepts reports from members but restricts review to moderators", async ({
+    browser,
+  }) => {
+    const memberContext = await browser.newContext();
+    const outsiderContext = await browser.newContext();
+
+    try {
+      await login(memberContext.request, `reporter-${Date.now()}`);
+      const room = await createRoom(memberContext.request, "Reports");
+
+      const created = await memberContext.request.post(`${API_URL}/reports`, {
+        data: { reason: "hostile chat", roomCode: room.code },
+      });
+      expect(created.status()).toBe(201);
+
+      // Reports review requires moderator role.
+      const reviewDenied = await memberContext.request.get(
+        `${API_URL}/admin/reports`,
+      );
+      expect(reviewDenied.status()).toBe(403);
+
+      await login(outsiderContext.request, `bystander-${Date.now()}`);
+      const kickDenied = await outsiderContext.request.post(
+        `${API_URL}/admin/rooms/${room.code}/kick`,
+        {
+          data: { userId: room.hostUserId },
+        },
+      );
+      expect(kickDenied.status()).toBe(403);
+    } finally {
+      await memberContext.close();
+      await outsiderContext.close();
+    }
+  });
 });

@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, metrics, redis, requireGameServer, user } from "../context.js";
+import { awardMatchAchievements } from "../achievements.js";
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   // Exchanges a one-time socket token for a verified room identity.
@@ -126,6 +127,15 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
              from jsonb_to_recordset($2::jsonb) as r(id uuid, tags integer)
              on conflict do nothing`,
             [match.rows[0].id, JSON.stringify(body.results)],
+          );
+
+          // Achievement evaluation is part of the completion transaction:
+          // awards commit atomically with the match record.
+          await awardMatchAchievements(
+            client,
+            match.rows[0].id,
+            body.results,
+            body.winnerUserId ?? null,
           );
         }
       }

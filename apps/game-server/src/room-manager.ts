@@ -53,6 +53,8 @@ export type RoomManagerOptions = {
   matchMs?: number;
   onBroadcast(roomCode: string, snapshot: Snapshot): void;
   onLifecycleFailure?(operation: string, error: unknown): void;
+  /** Observed wall-clock cost of one simulation tick, for latency metrics. */
+  onTickSample?(tickDurationMs: number): void;
   api: RoomLifecycleApi;
 };
 
@@ -222,6 +224,15 @@ export class RoomManager {
     return this.rooms.size;
   }
 
+  /** Rooms whose authoritative simulation is currently mid-match. */
+  activeMatchCount(): number {
+    let count = 0;
+    for (const room of this.rooms.values()) {
+      if (room.state.phase === "running") count += 1;
+    }
+    return count;
+  }
+
   /** Immediately remove a player (moderation kick) without grace period. */
   kick(roomCode: string, userId: string): boolean {
     const room = this.rooms.get(roomCode);
@@ -279,6 +290,7 @@ export class RoomManager {
         const current = this.rooms.get(roomCode);
         if (!current) return;
 
+        const tickStart = performance.now();
         const previousPhase = current.state.phase;
         current.state = tick(current.state, this.tickMs / 1000);
 
@@ -305,6 +317,7 @@ export class RoomManager {
         }
 
         this.broadcast(roomCode);
+        this.options.onTickSample?.(performance.now() - tickStart);
       }, this.tickMs),
     };
 

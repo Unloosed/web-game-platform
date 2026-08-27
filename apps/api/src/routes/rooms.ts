@@ -10,6 +10,7 @@ import {
   required,
 } from "../context.js";
 import { isChatAllowed } from "../../../../packages/platform/src/index.js";
+import { awardMatchAchievements } from "../achievements.js";
 
 const code = () =>
   randomBytes(5)
@@ -210,7 +211,9 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     const c = (req.params as any).code;
     const b = z
       .object({
-        results: z.array(z.object({ id: z.string(), tags: z.number() })),
+        results: z.array(
+          z.object({ id: z.string().uuid(), tags: z.number() }),
+        ),
         winnerUserId: z.string().nullable(),
       })
       .parse(req.body);
@@ -229,9 +232,15 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       [q.rows[0].id],
     );
     if (!existingMatch.rows[0]) {
-      await db.query(
-        "insert into matches(room_id,winner_user_id,started_at,ended_at,results) values($1,$2,now(),now(),$3)",
+      const inserted = await db.query<{ id: string }>(
+        "insert into matches(room_id,winner_user_id,started_at,ended_at,results) values($1,$2,now(),now(),$3) returning id",
         [q.rows[0].id, b.winnerUserId, JSON.stringify(b.results)],
+      );
+      await awardMatchAchievements(
+        db,
+        inserted.rows[0].id,
+        b.results,
+        b.winnerUserId,
       );
     }
     return { ok: true };

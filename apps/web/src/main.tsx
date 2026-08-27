@@ -64,6 +64,20 @@ type AuditEntry = {
   actorName: string;
   createdAt: string;
 };
+type Achievement = { code: string; grantedAt: string };
+type AdminReport = {
+  id: string;
+  reason: string;
+  status: string;
+  roomCode: string | null;
+  chatMessageId: string | null;
+  reporterName: string;
+  targetName: string | null;
+  createdAt: string;
+};
+// Mirrors PROTOCOL_VERSION in packages/protocol; the web app keeps its
+// dependency-free local type mirrors, so the constant is mirrored too.
+const PROTOCOL_VERSION = 1;
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:4000",
   GAME = import.meta.env.VITE_GAME_URL ?? "http://localhost:4100";
 const fetchApi = async (path: string, opts: RequestInit = {}) => {
@@ -154,6 +168,27 @@ function MyMatches({ userId }: { userId: string }) {
         {rows.slice(0, 5).map((m) => (
           <li key={m.id}>
             {m.roomName} — {m.tags} tags — winner: {m.winnerName ?? "none"}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+function MyAchievements({ userId }: { userId: string }) {
+  const [rows, setRows] = useState<Achievement[] | null>(null);
+  useEffect(() => {
+    void fetchApi(`/users/${userId}/achievements`)
+      .then((r) => setRows(r.achievements))
+      .catch(() => setRows([]));
+  }, [userId]);
+  if (!rows || rows.length === 0) return null;
+  return (
+    <section>
+      <h2>Achievements</h2>
+      <ul data-testid="achievements">
+        {rows.map((a) => (
+          <li key={a.code}>
+            {a.code} — {new Date(a.grantedAt).toLocaleDateString()}
           </li>
         ))}
       </ul>
@@ -315,6 +350,7 @@ function Lobby({
       <Leaderboard />
 
       <MyMatches userId={user.id} />
+      <MyAchievements userId={user.id} />
     </section>
   );
 }
@@ -371,7 +407,11 @@ function Game({
       // client never asserts its own user id on the socket.
       s = io(GAME, {
         transports: ["websocket"],
-        auth: { roomCode: room.code, token },
+        auth: {
+          roomCode: room.code,
+          token,
+          protocolVersion: PROTOCOL_VERSION,
+        },
       });
       sock.current = s;
 
@@ -618,6 +658,7 @@ function Game({
 function Admin({ user, back }: { user: User; back: () => void }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [rooms, setRooms] = useState<AdminRoom[]>([]);
+  const [reports, setReports] = useState<AdminReport[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [err, setErr] = useState("");
 
@@ -626,6 +667,7 @@ function Admin({ user, back }: { user: User; back: () => void }) {
       setErr("");
       setUsers((await fetchApi("/admin/users")).users);
       setRooms((await fetchApi("/admin/rooms")).rooms);
+      setReports((await fetchApi("/admin/reports?status=all")).reports);
       setAudit((await fetchApi("/admin/audit")).entries);
     } catch (error) {
       setErr(error instanceof Error ? error.message : "Admin data unavailable");
@@ -745,6 +787,58 @@ function Admin({ user, back }: { user: User; back: () => void }) {
           ))}
         </tbody>
       </table>
+
+      <h2>Reports</h2>
+      {reports.length === 0 && <p>No reports.</p>}
+      {reports.length > 0 && (
+        <table aria-label="admin-reports">
+          <thead>
+            <tr>
+              <th>Reporter</th>
+              <th>Target</th>
+              <th>Room</th>
+              <th>Reason</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reports.map((rp) => (
+              <tr key={rp.id}>
+                <td>{rp.reporterName}</td>
+                <td>{rp.targetName ?? "—"}</td>
+                <td>{rp.roomCode ?? "—"}</td>
+                <td>{rp.reason}</td>
+                <td>{rp.status}</td>
+                <td>
+                  {rp.status === "open" && (
+                    <>
+                      <button
+                        onClick={() =>
+                          void act(`/admin/reports/${rp.id}/resolve`, {
+                            status: "resolved",
+                          })
+                        }
+                      >
+                        Resolve
+                      </button>{" "}
+                      <button
+                        onClick={() =>
+                          void act(`/admin/reports/${rp.id}/resolve`, {
+                            status: "dismissed",
+                          })
+                        }
+                      >
+                        Dismiss
+                      </button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <h2>Audit log</h2>
       <ul aria-label="admin-audit">

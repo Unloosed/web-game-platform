@@ -1,4 +1,12 @@
 import { z } from "zod";
+
+/**
+ * Wire-protocol version. Clients present it in their Socket.IO handshake;
+ * the game server rejects mismatched clients so old builds fail fast
+ * instead of misinterpreting snapshots.
+ */
+export const PROTOCOL_VERSION = 1;
+
 export const directionSchema = z.enum(["up", "down", "left", "right", "none"]);
 export const inputSchema = z.object({
   type: z.literal("input"),

@@ -9,6 +9,7 @@ import { roomRoutes } from "./routes/rooms.js";
 import { matchRoutes } from "./routes/matches.js";
 import { adminRoutes } from "./routes/admin.js";
 import { internalRoutes } from "./routes/internal.js";
+import { reportRoutes } from "./routes/reports.js";
 
 const app: FastifyInstance = Fastify({
   logger: true,
@@ -35,6 +36,24 @@ app.addHook("onResponse", async (req, reply) => {
     method: req.method,
     status: String(reply.statusCode),
   });
+});
+
+// CSRF policy: browsers implicitly attach cookies to cross-site
+// state-changing requests, so any state-changing request that carries an
+// Origin header must come from an allowlisted origin. Non-browser clients
+// (the game server's internal calls, scripts) send no Origin header and
+// are authorized by other means (shared secret, session ownership).
+const allowedOrigins = env.CORS_ORIGIN.split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.addHook("onRequest", async (req, reply) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS")
+    return;
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && !allowedOrigins.includes(origin)) {
+    reply.code(403).send({ error: "origin_not_allowed" });
+  }
 });
 
 app.get("/health", async () => ({ status: "ok" }));
@@ -75,6 +94,7 @@ await app.register(roomRoutes);
 await app.register(matchRoutes);
 await app.register(adminRoutes);
 await app.register(internalRoutes);
+await app.register(reportRoutes);
 
 app.setErrorHandler((error: Error, req, reply) => {
   if (reply.statusCode < 400) {

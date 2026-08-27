@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  evaluateAchievements,
   isChatAllowed,
   MetricsRegistry,
   parseBannedWords,
@@ -80,5 +81,28 @@ describe("moderation filter", () => {
 
   it("matches punctuation-wrapped terms", () => {
     expect(isChatAllowed("nice (badword) there", words)).toBe(false);
+  });
+});
+
+describe("achievements", () => {
+  const WINNER = "11111111-1111-1111-1111-111111111111";
+  const LOSER = "22222222-2222-2222-2222-222222222222";
+
+  const stats = {
+    winnerUserId: WINNER,
+    players: [
+      { userId: WINNER, tags: 6 },
+      { userId: LOSER, tags: 1 },
+    ],
+  };
+
+  it("awards first_match and first_win to the winner", () => {
+    expect(evaluateAchievements(stats, WINNER)).toEqual(
+      expect.arrayContaining(["first_match", "first_win", "sharpshooter"]),
+    );
+  });
+
+  it("awards only participation to a low-tag loser", () => {
+    expect(evaluateAchievements(stats, LOSER)).toEqual(["first_match"]);
   });
 });

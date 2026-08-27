@@ -21,11 +21,22 @@ PostgreSQL, Redis.
 | `MODERATION_BANNED_WORDS` | api, game-server | Comma-separated banned chat terms |
 | `ROOM_RECONNECT_GRACE_MS` | game-server | Reconnect grace before player state is dropped |
 | `GAME_MATCH_MS` | game-server | Match duration for the sample tag game (60000); lower it in test environments for faster end-to-end runs |
+| `MAX_SOCKETS_PER_USER` | game-server | Connection quota per account (4) |
+| `MAX_SOCKETS_PER_IP` | game-server | Connection quota per client IP (16) |
 | `EMPTY_ROOM_TTL_MS` | api | Cleanup age for never-joined waiting rooms |
 | `SOCKET_TOKEN_TTL_MS` | api | Lifetime of one-time socket handshake tokens |
+| `S3_ENDPOINT` / `S3_REGION` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | api | Optional S3-compatible object storage credentials for `packages/storage` `S3Storage` (works with MinIO and other path-style endpoints) |
 
 All secrets come from the environment; never commit them. Generate the
 shared secret with `openssl rand -base64 48`.
+
+### CSRF and origin policy
+
+The API rejects state-changing requests (`POST`/`PUT`/`PATCH`/`DELETE`)
+that carry an `Origin` header outside `CORS_ORIGIN` (comma-separated list
+allowed). Server-to-server callers and scripts send no `Origin` header and
+are unaffected; browsers are protected against cross-site cookie use. Set
+`CORS_ORIGIN` to the exact public web origin when deploying.
 
 ## Docker Compose
 
@@ -44,7 +55,8 @@ docker compose -f docker-compose.prod.yml up -d --build
 For existing databases initialized before milestone 4, apply
 `infra/migrations/002-milestone-4.sql` once. Databases initialized before
 milestone 3.1 also need `infra/migrations/003-room-member-ready.sql`
-(per-membership ready state).
+(per-membership ready state), and milestone 4 adds
+`infra/migrations/004-milestone-4-hardening.sql` (achievements, reports).
 
 ## Reverse proxy and WebSocket upgrades
 
@@ -81,15 +93,21 @@ limits see client IPs.
   Redis; `GET /health` (both services) is a liveness probe.
 - **Metrics**: `GET /metrics` on both API (4000) and game-server (4100)
   exposes Prometheus text format — requests, rate-limit rejections,
-  moderation rejections, active rooms, connected players, verified
-  handshakes, input/chat rejections. Any OpenTelemetry Collector with the
-  Prometheus receiver can scrape these.
+  moderation actions and rejections, active rooms, active matches,
+  connected players, verified handshakes, protocol/quota rejections,
+  snapshot broadcasts, tick latency, lifecycle failures, input/chat
+  rejections, match completions. Any OpenTelemetry Collector with the
+  Prometheus receiver can scrape these; add the OpenTelemetry trace SDK
+  only when an operator runs a collector for distributed tracing.
 - **Logs**: both services emit newline-delimited JSON structured logs.
   Correlation: the API honors/echoes `x-request-id` on every request.
 
 ## Object storage
 
-`packages/storage` defines the `StorageAdapter` interface with a local
-filesystem implementation (sharded, traversal-safe, content-hashed etags).
-Mount a volume at the configured root for single-node deployments; an
-S3-compatible adapter can be added later without touching call sites.
+`packages/storage` defines the `StorageAdapter` interface with two
+implementations: a local filesystem adapter (sharded, traversal-safe,
+content-hashed etags — mount a volume for single-node deployments) and an
+S3-compatible adapter (`S3Storage`, path-style, AWS Signature V4, no SDK
+dependency — works with S3, MinIO, and compatible stores via the
+`S3_*` environment variables). Choose the adapter at startup; call sites
+are unchanged either way.

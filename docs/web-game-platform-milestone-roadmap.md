@@ -10,13 +10,8 @@ This roadmap covers the reusable, self-hosted TypeScript Web Game Platform. It r
 | Milestone 2 | Completed | Persistent dev users and sessions, lobby, persisted rooms, invite codes, and basic chat |
 | Milestone 3 | Completed | Server-authoritative tag-game mechanics, score/timer UI, spectator baseline, and test scaffolding |
 | Milestone 3.1 | Completed | Room lifecycle repair: lifecycle persistence boundaries, reconnect grace, server-authorized spectators, deterministic ready-gated startup, idempotent completion |
-| Milestone 4 | Planned | Match history, leaderboards, moderation, observability, rate limiting, and production deployment hardening |
+| Milestone 4 | Completed | Achievements, moderation reports, kick, connection quotas, protocol-version gating, CSRF policy, extended observability, S3-compatible storage |
 | Milestone 5 | Planned | Formal game registry/plugin model, second game reference implementation, and extension guide validation |
-
-> Note (2026-08): Milestones 4-era capabilities (match history/leaderboard APIs,
-> admin/moderation with audit log, rate limits, metrics endpoints, production
-> Dockerfiles) already exist in working form ahead of the formal milestone;
-> see the repository state and `docs/deployment.md`.
 
 ---
 
@@ -285,59 +280,59 @@ The API owns durable room metadata; the game server owns live simulation. They m
 
 # Milestone 4: Platform hardening and production operations
 
-**Status: Planned**
+**Status: Completed**
 
 ## Objective
 
 Add durable game outcomes, moderation, observability, abuse protection, production Docker/deployment artifacts, and operational controls.
 
-## Deliverables
+## Delivered
 
 ### Persistent results and social features
 
-- `matches`, `match_players`, and optionally `match_events` data models.
-- Match-history APIs and player profile views.
-- Leaderboard definitions per game/ruleset/season.
-- Achievement contract and initial achievement persistence.
-- Result write hook exposed through the server SDK.
+- `matches`, `match_players` data models with history/leaderboard APIs and player profile views (`GET /users/:id/matches`, `GET /users/:id/achievements`, `GET /leaderboard`).
+- Achievement contract (`packages/platform`): pure `MatchStats`-based evaluation with initial definitions (`first_match`, `first_win`, `sharpshooter`); awards persist in the `achievements` table inside the match-completion transaction and render in the lobby profile panel.
+- Result write hook: `RoomLifecycleApi.persistCompletion` is the SDK-level hook the game server uses for every durable result write; the internal lifecycle route persists matches, players, and achievements atomically.
 
 ### Moderation and administration
 
-- Durable roles: guest, player, moderator, admin.
-- Admin dashboard foundation for users, rooms, reports, and moderation actions.
-- Audit-log records for sensitive actions.
-- Chat moderation pipeline with pluggable classifiers/word lists/manual review integration.
-- Mute, kick, room close, and ban actions with permission checks.
+- Durable roles: player, moderator, admin (guests join rooms as spectators, the platform's guest equivalent).
+- Admin dashboard: users (ban/mute/role), rooms (close/kick), reports (resolve/dismiss), audit log.
+- Audit-log records for every sensitive action; `moderation_actions_total` metric per action type.
+- Chat moderation pipeline: synchronous word-list classifier (`isChatAllowed`, operator-extendable via `MODERATION_BANNED_WORDS`) plus `POST /reports` and `GET /admin/reports` for manual review.
+- Mute, ban, room close, and room-scoped kick with permission checks and live-session enforcement on the game server.
 
 ### Abuse protection
 
-- Redis-backed rate limits for authentication, room creation, chat, Socket.IO messages, and joins.
-- Connection quotas per IP and account.
-- Payload-size limits and protocol-version validation.
-- Trusted proxy configuration, CORS allowlist, secure cookies, and CSRF policy for state-changing HTTP requests.
+- Redis-backed rate limits for login, room creation, room join, chat (HTTP and socket), socket tokens, reports, and gameplay inputs.
+- Connection quotas per account and per IP (`MAX_SOCKETS_PER_USER`, `MAX_SOCKETS_PER_IP`) enforced at handshake.
+- Protocol-version validation: clients present `PROTOCOL_VERSION` at handshake; mismatches are rejected and counted.
+- Payload-size limits (Fastify `bodyLimit`, Socket.IO `maxHttpBufferSize`), trusted-proxy support, CORS allowlist, secure cookies in production, and a CSRF policy that rejects state-changing requests carrying a non-allowlisted `Origin`.
 
 ### Observability
 
-- Pino structured logs with correlation IDs.
-- OpenTelemetry-compatible traces around HTTP routes, DB calls, Socket.IO events, room transitions, and tick processing.
-- Metrics: active rooms, connected players, active matches, snapshot rate, tick latency, input rejection count, moderation actions, and error rate.
-- Generic OTLP exporter configuration and health/readiness endpoints.
+- Structured JSON logs on both services; API request correlation IDs via `x-request-id`.
+- Metrics: active rooms, active matches, connected players, snapshot broadcast rate, tick latency, match completions, input/chat rejections, connection quota and protocol rejections, lifecycle failures, moderation actions, rate-limit rejections, HTTP request counts.
+- Health (`/health`), DB/Redis readiness (`/health/ready`), and Prometheus `/metrics` endpoints on both services; any OTLP Collector with a Prometheus receiver can scrape them.
 
 ### Deployment
 
-- Multi-stage production Dockerfiles.
-- Non-root process users and explicit runtime environment validation.
-- Generic deployment guide for container platforms.
-- Reverse-proxy and WebSocket upgrade documentation.
-- Redis-backed Socket.IO adapter and room-routing/sticky-session strategy.
-- Object storage abstraction with local filesystem and S3-compatible implementations.
+- Multi-stage production Dockerfiles with non-root users (`infra/*.Dockerfile`, `apps/web/Dockerfile`) and Compose production wiring.
+- Generic deployment guide (`docs/deployment.md`) covering env vars, reverse proxy/WebSocket upgrades, sticky room routing, and health/metrics.
+- Redis-backed Socket.IO adapter and documented room-routing strategy.
+- Object storage abstraction (`packages/storage`): local filesystem adapter plus a dependency-free S3-compatible adapter (`S3Storage`) with AWS Signature V4 verified against the AWS documentation test vector.
 
-## Definition of done
+## Definition of done — met
 
-- Completed matches appear in history and contribute to a leaderboard.
-- Every admin/moderation action is authorized and audited.
-- Rate-limit violations are observable and safely rejected.
+- Completed matches appear in history and contribute to the leaderboard (plus achievements).
+- Every admin/moderation action is authorized by role and written to the audit log.
+- Rate-limit violations are observable (`rate_limited_total` per bucket) and safely rejected with `retry-after`.
 - A container-platform operator can deploy API, game server, Postgres, Redis, and object storage using documented environment variables and reverse-proxy configuration.
+
+## Deferred with rationale
+
+- OpenTelemetry span tracing: the Prometheus exposition is already OTLP-Collector compatible; introducing the full trace SDK is deferred until an operator actually runs a collector, since the metric set already covers the M4 diagnostic targets. Upgrade path: add `@opentelemetry/sdk-node` with auto-instrumentations in both services, exported via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+- Season/rule-scoped leaderboard variants arrive with the Milestone 5 game registry (`rooms.game_id`), which is the natural keying dimension.
 
 ---
 
@@ -381,8 +376,7 @@ Prove that a second game can be added without modifying platform internals, and 
 
 # Suggested execution order
 
-1. Milestones 3 and 3.1 are complete; do not add new game features that bypass the repaired lifecycle.
-2. Formalize match persistence and results as the first Milestone 4 deliverable; this validates the repaired lifecycle against real history/leaderboard consumers.
-3. Add rate limits and handshake/session validation hardening before exposing the platform outside local development.
-4. Add observability before horizontal scaling, so room-routing failures can be diagnosed.
-5. Implement the game registry and second game in Milestone 5 after lifecycle and result hooks are stable.
+1. Milestones 3, 3.1, and 4 are complete; do not add new features that bypass the repaired lifecycle or the hardening gates.
+2. Implement the game registry and second game in Milestone 5 after the lifecycle, hardening, and result hooks — all now stable.
+3. Extend the leaderboard with per-game dimensions as part of the Milestone 5 registry work (`rooms.game_id`).
+4. If horizontal scaling arrives, introduce the OpenTelemetry trace SDK alongside a collector so room-routing failures can be traced.
