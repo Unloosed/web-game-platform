@@ -100,9 +100,9 @@ Replace the purely in-memory local-room workflow with a persistent lobby and ses
 
 - `GET /rooms` for public-room discovery.
 - `POST /rooms` for room creation.
-- `POST /rooms/join-by-code` for public and private invite-code entry.
-- `GET /rooms/:id` for member-authorized room details.
-- `POST /rooms/:id/start` as the initial host-only lifecycle operation.
+- `POST /rooms/join` for public and private invite-code entry.
+- `GET /rooms/:code` for member-authorized room details.
+- `POST /rooms/:code/start` as the initial host-only lifecycle operation.
 
 ### Lobby and room UI
 

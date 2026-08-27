@@ -1,5 +1,4 @@
 import { FastifyInstance } from "fastify";
-import { randomBytes } from "crypto";
 import { z } from "zod";
 import {
   bannedWords,
@@ -9,15 +8,11 @@ import {
   metrics,
   required,
 } from "../context.js";
-import { isChatAllowed } from "../../../../packages/platform/src/index.js";
-import { awardMatchAchievements } from "../achievements.js";
-
-const code = () =>
-  randomBytes(5)
-    .toString("base64url")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
-    .slice(0, 6);
+import {
+  isChatAllowed,
+  newRoomCode,
+} from "../../../../packages/platform/src/index.js";
+import { persistMatchRecord } from "../completion.js";
 
 export async function roomRoutes(app: FastifyInstance): Promise<void> {
   app.get("/rooms", async () => {
@@ -72,7 +67,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
         r = (
           await db.query(
             'insert into rooms(code,name,is_private,host_user_id) values($1,$2,$3,$4) returning id,code,name,is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId"',
-            [code(), b.name, b.isPrivate, u.id],
+            [newRoomCode(), b.name, b.isPrivate, u.id],
           )
         ).rows[0];
       } catch {
@@ -170,13 +165,20 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     const c = (req.params as any).code;
-    const q = await db.query<{ id: string }>(
-      "select r.id from rooms r join room_members m on r.id=m.room_id where r.code=$1 and m.user_id=$2 and m.role='host'",
+    // Host-only, and only a fresh waiting room may transition to running:
+    // archived rooms stay closed, and rematches go through the realtime
+    // restart_match gate.
+    const q = await db.query<{ id: string; status: string }>(
+      "select r.id, r.status from rooms r join room_members m on r.id=m.room_id where r.code=$1 and m.user_id=$2 and m.role='host'",
       [c, u.id],
     );
     if (!q.rows[0]) {
       reply.code(403);
       return { error: "not_host" };
+    }
+    if (q.rows[0].status !== "waiting") {
+      reply.code(409);
+      return { error: "room_not_startable" };
     }
     // Mirror the game-server startup gate: enough participants and
     // every non-spectator member explicitly ready.
@@ -212,36 +214,39 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     const b = z
       .object({
         results: z.array(
-          z.object({ id: z.string().uuid(), tags: z.number() }),
+          z.object({ id: z.string().uuid(), tags: z.number().int().nonnegative() }),
         ),
-        winnerUserId: z.string().nullable(),
+        winnerUserId: z.string().uuid().nullable(),
       })
       .parse(req.body);
-    const q = await db.query<{ id: string }>(
-      "update rooms r set status='completed',updated_at=now() from room_members m where r.id=m.room_id and r.code=$1 and m.user_id=$2 and m.role='host' returning r.id",
-      [c, u.id],
-    );
-    if (!q.rows[0]) {
-      reply.code(403);
-      return { error: "not_host" };
-    }
-    // Idempotent: a room keeps at most one durable match record, matching
-    // the internal game-server lifecycle route.
-    const existingMatch = await db.query(
-      "select 1 from matches where room_id = $1 limit 1",
-      [q.rows[0].id],
-    );
-    if (!existingMatch.rows[0]) {
-      const inserted = await db.query<{ id: string }>(
-        "insert into matches(room_id,winner_user_id,started_at,ended_at,results) values($1,$2,now(),now(),$3) returning id",
-        [q.rows[0].id, b.winnerUserId, JSON.stringify(b.results)],
+
+    // Same durable, idempotent sink as the internal game-server lifecycle
+    // route: one transaction writes the room status, match record, player
+    // rows, and achievements; an existing match guard blocks duplicates.
+    const client = await db.connect();
+    try {
+      await client.query("begin");
+      const q = await client.query<{ id: string }>(
+        "update rooms r set status='completed',updated_at=now() from room_members m where r.id=m.room_id and r.code=$1 and m.user_id=$2 and m.role='host' returning r.id",
+        [c, u.id],
       );
-      await awardMatchAchievements(
-        db,
-        inserted.rows[0].id,
-        b.results,
+      if (!q.rows[0]) {
+        await client.query("rollback");
+        reply.code(403);
+        return { error: "not_host" };
+      }
+      await persistMatchRecord(
+        client,
+        q.rows[0].id,
         b.winnerUserId,
+        b.results,
       );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
     }
     return { ok: true };
   });

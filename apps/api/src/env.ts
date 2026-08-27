@@ -17,6 +17,7 @@ export const env = z
     TRUST_PROXY: z.coerce.boolean().default(false),
     MODERATION_BANNED_WORDS: z.string().default("spam,scam"),
     SOCKET_TOKEN_TTL_MS: z.coerce.number().default(60_000),
+    LOGIN_RATE_LIMIT: z.coerce.number().default(10),
   })
   .parse(process.env);
 

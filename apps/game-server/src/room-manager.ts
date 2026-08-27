@@ -43,7 +43,8 @@ export type PlayerConnection = {
 type RoomInstance = {
   state: State;
   hostUserId: string | null;
-  connectedSocketIdsByUser: Map<string, string>;
+  /** Live socket ids per user; a user may hold several (multi-tab). */
+  connectedSocketIdsByUser: Map<string, Set<string>>;
   timer: ReturnType<typeof setInterval>;
 };
 
@@ -77,7 +78,15 @@ export class RoomManager {
 
     this.cancelPendingRemoval(roomCode, connection.userId);
 
-    room.connectedSocketIdsByUser.set(connection.userId, connection.socketId);
+    const sockets = room.connectedSocketIdsByUser.get(connection.userId);
+    if (sockets) {
+      sockets.add(connection.socketId);
+    } else {
+      room.connectedSocketIdsByUser.set(
+        connection.userId,
+        new Set([connection.socketId]),
+      );
+    }
     room.state = addPlayer(
       room.state,
       connection.userId,
@@ -93,11 +102,22 @@ export class RoomManager {
     return this.broadcast(roomCode);
   }
 
-  disconnect(roomCode: string, userId: string): void {
+  disconnect(roomCode: string, userId: string, socketId?: string): void {
     const room = this.rooms.get(roomCode);
     if (!room) return;
 
-    room.connectedSocketIdsByUser.delete(userId);
+    const sockets = room.connectedSocketIdsByUser.get(userId);
+    if (sockets) {
+      if (socketId === undefined) {
+        room.connectedSocketIdsByUser.delete(userId);
+      } else {
+        sockets.delete(socketId);
+        // One of several live sockets (multi-tab) went away; the player only
+        // enters reconnect grace once their last socket disconnects.
+        if (sockets.size > 0) return;
+        room.connectedSocketIdsByUser.delete(userId);
+      }
+    }
 
     const key = this.removalKey(roomCode, userId);
     const timer = setTimeout(() => {

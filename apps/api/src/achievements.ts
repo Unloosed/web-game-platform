@@ -8,7 +8,7 @@ import {
  * PoolClient. Achievement rows are written on the same connection as the
  * match insert so awards commit or roll back atomically with the result.
  */
-type QueryRunner = {
+export type QueryRunner = {
   query(
     sql: string,
     values?: unknown[],

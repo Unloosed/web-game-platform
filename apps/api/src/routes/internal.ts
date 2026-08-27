@@ -1,7 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db, metrics, redis, requireGameServer, user } from "../context.js";
-import { awardMatchAchievements } from "../achievements.js";
+import { persistMatchRecord } from "../completion.js";
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   // Exchanges a one-time socket token for a verified room identity.
@@ -100,44 +100,12 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
 
       if (body.status === "completed" && body.results && body.results.length > 0) {
         // Idempotent: a room keeps at most one durable match record.
-        const existingMatch = await client.query(
-          "select 1 from matches where room_id = $1 limit 1",
-          [room.id],
+        await persistMatchRecord(
+          client,
+          room.id,
+          body.winnerUserId ?? null,
+          body.results,
         );
-
-        if (!existingMatch.rows[0]) {
-          const match = await client.query<{ id: string }>(
-            `
-            insert into matches(
-              room_id,
-              winner_user_id,
-              started_at,
-              ended_at,
-              results
-            )
-            values($1,$2,now(),now(),$3)
-            returning id
-          `,
-            [room.id, body.winnerUserId ?? null, JSON.stringify(body.results)],
-          );
-
-          await client.query(
-            `insert into match_players(match_id,user_id,tags)
-             select $1, r.id, r.tags
-             from jsonb_to_recordset($2::jsonb) as r(id uuid, tags integer)
-             on conflict do nothing`,
-            [match.rows[0].id, JSON.stringify(body.results)],
-          );
-
-          // Achievement evaluation is part of the completion transaction:
-          // awards commit atomically with the match record.
-          await awardMatchAchievements(
-            client,
-            match.rows[0].id,
-            body.results,
-            body.winnerUserId ?? null,
-          );
-        }
       }
 
       await client.query("commit");

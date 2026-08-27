@@ -124,6 +124,12 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       minutes: b.minutes,
     });
     countModerationAction(until ? "mute" : "unmute");
+    // Enforce the mute on live sockets too; handshake-time checks alone
+    // would let a muted user keep chatting until they reconnect.
+    propagateToGameServer(`/internal/users/${targetId}/mute`, {
+      method: "POST",
+      body: JSON.stringify({ muted: !!until }),
+    });
     return { ok: true };
   });
 

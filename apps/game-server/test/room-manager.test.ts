@@ -367,6 +367,59 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
+  it("keeps a player while another of their sockets is still connected", () => {
+    vi.useFakeTimers();
+
+    const { manager } = createManager();
+    connectHost(manager);
+    connectPlayer(manager, { socketId: "guest-tab-1" });
+    connectPlayer(manager, { socketId: "guest-tab-2" });
+
+    // One tab drops; the player must be retained because the other is live.
+    manager.disconnect(ROOM_CODE, PLAYER_ID, "guest-tab-1");
+    vi.advanceTimersByTime(10_000);
+
+    expect(
+      manager
+        .getSnapshot(ROOM_CODE)
+        ?.players.some((p) => p.id === PLAYER_ID),
+    ).toBe(true);
+
+    // The last socket leaving triggers the normal grace removal.
+    manager.disconnect(ROOM_CODE, PLAYER_ID, "guest-tab-2");
+    vi.advanceTimersByTime(1_000);
+
+    expect(
+      manager
+        .getSnapshot(ROOM_CODE)
+        ?.players.some((p) => p.id === PLAYER_ID),
+    ).toBe(false);
+
+    manager.dispose();
+  });
+
+  it("keeps a player when they reconnect after a sibling tab disconnected", () => {
+    vi.useFakeTimers();
+
+    const { manager } = createManager();
+    connectHost(manager);
+    connectPlayer(manager, { socketId: "guest-tab-1" });
+    connectPlayer(manager, { socketId: "guest-tab-2" });
+
+    manager.disconnect(ROOM_CODE, PLAYER_ID, "guest-tab-1");
+    // Reconnect replaces the closed socket without duplicating the player.
+    connectPlayer(manager, { socketId: "guest-tab-3" });
+    vi.advanceTimersByTime(10_000);
+
+    expect(
+      manager
+        .getSnapshot(ROOM_CODE)
+        ?.players.filter((p) => p.id === PLAYER_ID).length,
+    ).toBe(1);
+
+    manager.dispose();
+  });
+
   it("deletes an empty waiting room from persistence", async () => {
     vi.useFakeTimers();
 

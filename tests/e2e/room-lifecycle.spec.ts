@@ -138,6 +138,12 @@ test.describe("Milestone 3.1 room lifecycle", () => {
           .getByText("Grace Guest")
           .count(),
       ).toBe(1);
+      // The readiness panel only renders outside a running match; wait for
+      // the authoritative completion rather than a timing window.
+      await expect(reconnected.getByTestId("match-status")).toHaveText(
+        "Match completed",
+        { timeout: 30_000 },
+      );
       await expect(reconnected.getByTestId("readiness")).toContainText("/2");
     } finally {
       await hostContext.close();
@@ -165,8 +171,10 @@ test.describe("Milestone 3.1 room lifecycle", () => {
       await joinByCode(watcher, code);
 
       // The toggle updates durable membership; the API then propagates the
-      // role change to the live socket session.
-      await watcher.getByRole("checkbox").check();
+      // role change to the live socket session. Click (not check): the
+      // controlled checkbox re-renders with each 20 Hz snapshot, so assert
+      // the authoritative server state below instead of the input state.
+      await watcher.getByRole("checkbox").click();
 
       await expect(watcher.getByTestId("scoreboard")).toContainText(
         "(spectator)",

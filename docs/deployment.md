@@ -25,6 +25,7 @@ PostgreSQL, Redis.
 | `MAX_SOCKETS_PER_IP` | game-server | Connection quota per client IP (16) |
 | `EMPTY_ROOM_TTL_MS` | api | Cleanup age for never-joined waiting rooms |
 | `SOCKET_TOKEN_TTL_MS` | api | Lifetime of one-time socket handshake tokens |
+| `LOGIN_RATE_LIMIT` | api | Sign-ins allowed per IP per 10 minutes (10); raise for environments that sign in many users in quick succession, e.g. the E2E suites |
 | `S3_ENDPOINT` / `S3_REGION` / `S3_BUCKET` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | api | Optional S3-compatible object storage credentials for `packages/storage` `S3Storage` (works with MinIO and other path-style endpoints) |
 
 All secrets come from the environment; never commit them. Generate the

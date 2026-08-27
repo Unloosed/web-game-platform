@@ -40,7 +40,7 @@ export class LocalDiskStorage implements StorageAdapter {
 
   async put(
     data: Buffer,
-    key = randomUUID(),
+    key: string = randomUUID(),
   ): Promise<{ key: string; etag: string }> {
     const path = keyToPath(this.root, key);
     await mkdir(dirname(path), { recursive: true });
@@ -170,7 +170,7 @@ export class S3Storage implements StorageAdapter {
 
   async put(
     data: Buffer,
-    key = randomUUID(),
+    key: string = randomUUID(),
   ): Promise<{ key: string; etag: string }> {
     const response = await this.request("PUT", key, data);
     if (!response.ok) {

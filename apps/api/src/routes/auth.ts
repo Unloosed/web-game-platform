@@ -16,8 +16,17 @@ import {
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post("/auth/dev-login", async (req, reply) => {
+    // Per-IP cap; raise LOGIN_RATE_LIMIT for environments that sign in many
+    // users in quick succession (e.g. the end-to-end suites).
     if (
-      !(await enforceRateLimit(req, reply, "login", clientIp(req), 10, 10 * 60_000))
+      !(await enforceRateLimit(
+        req,
+        reply,
+        "login",
+        clientIp(req),
+        env.LOGIN_RATE_LIMIT,
+        10 * 60_000,
+      ))
     )
       return;
 

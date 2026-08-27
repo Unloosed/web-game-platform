@@ -20,8 +20,34 @@ const app: FastifyInstance = Fastify({
   trustProxy: env.TRUST_PROXY,
 });
 
-await app.register(cors, { origin: env.CORS_ORIGIN, credentials: true });
+// CORS_ORIGIN is a comma-separated allowlist; @fastify/cors echoes back
+// the request origin when it matches one of the entries.
+const allowedOrigins = env.CORS_ORIGIN.split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+await app.register(cors, { origin: allowedOrigins, credentials: true });
 await app.register(cookie);
+
+// No-payload POSTs (e.g. POST /rooms/:code/start, POST /auth/socket-token)
+// are legitimate: treat an empty JSON body as {} instead of rejecting with
+// FST_ERR_CTP_EMPTY_JSON_BODY. Routes still validate via zod.
+app.addContentTypeParser(
+  "application/json",
+  { parseAs: "string" },
+  (_req, body: string, done) => {
+    if (body === "" || body === undefined) {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(body));
+    } catch (error) {
+      (error as { statusCode?: number }).statusCode = 400;
+      done(error as Error, undefined);
+    }
+  },
+);
 
 // Observability: correlation id propagation + request counters.
 app.addHook("onRequest", async (req, reply) => {
@@ -43,9 +69,6 @@ app.addHook("onResponse", async (req, reply) => {
 // Origin header must come from an allowlisted origin. Non-browser clients
 // (the game server's internal calls, scripts) send no Origin header and
 // are authorized by other means (shared secret, session ownership).
-const allowedOrigins = env.CORS_ORIGIN.split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
 
 app.addHook("onRequest", async (req, reply) => {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS")

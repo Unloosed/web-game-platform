@@ -92,20 +92,28 @@ const fetchApi = async (path: string, opts: RequestInit = {}) => {
 };
 function Login({ onLogin }: { onLogin: (u: User) => void }) {
   const [n, setN] = useState("");
+  const [err, setErr] = useState("");
   return (
     <section>
       <h1>Web Game Platform</h1>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          onLogin(
-            (
-              await fetchApi("/auth/dev-login", {
-                method: "POST",
-                body: JSON.stringify({ displayName: n }),
-              })
-            ).user,
-          );
+          try {
+            setErr("");
+            onLogin(
+              (
+                await fetchApi("/auth/dev-login", {
+                  method: "POST",
+                  body: JSON.stringify({ displayName: n }),
+                })
+              ).user,
+            );
+          } catch (error) {
+            setErr(
+              error instanceof Error ? error.message : "Could not sign in",
+            );
+          }
         }}
       >
         <input
@@ -116,6 +124,13 @@ function Login({ onLogin }: { onLogin: (u: User) => void }) {
         />
         <button>Sign in</button>
       </form>
+      {err && (
+        <p role="alert">
+          {err === "rate_limited"
+            ? "Too many sign-in attempts. Please retry shortly."
+            : err}
+        </p>
+      )}
     </section>
   );
 }
@@ -661,6 +676,7 @@ function Admin({ user, back }: { user: User; back: () => void }) {
   const [reports, setReports] = useState<AdminReport[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [err, setErr] = useState("");
+  const [kickUser, setKickUser] = useState("");
 
   const reload = async (): Promise<void> => {
     try {
@@ -781,7 +797,26 @@ function Admin({ user, back }: { user: User; back: () => void }) {
                   onClick={() => void act(`/admin/rooms/${r.code}/close`, {})}
                 >
                   Close room
-                </button>
+                </button>{" "}
+                <form
+                  style={{ display: "inline" }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!kickUser.trim()) return;
+                    void act(`/admin/rooms/${r.code}/kick`, {
+                      userId: kickUser.trim(),
+                    });
+                  }}
+                >
+                  <input
+                    aria-label={`Kick user id from ${r.code}`}
+                    placeholder="User id"
+                    size={36}
+                    value={kickUser}
+                    onChange={(e) => setKickUser(e.target.value)}
+                  />{" "}
+                  <button type="submit">Kick</button>
+                </form>
               </td>
             </tr>
           ))}

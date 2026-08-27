@@ -2,6 +2,24 @@
 // Redis fixed-window rate limiting, a small Prometheus-style metrics
 // registry, and chat moderation filtering.
 
+import { randomBytes } from "node:crypto";
+
+/**
+ * Six-character room invite code. raw byte encoding can filter out
+ * non-alphanumeric characters, so sample until the code is exactly six
+ * characters — join flows validate a strict 6-character code.
+ */
+export function newRoomCode(): string {
+  for (;;) {
+    const code = randomBytes(5)
+      .toString("base64url")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 6);
+    if (code.length === 6) return code;
+  }
+}
+
 /** Minimal async command surface of the redis v4 client used here. */
 export type RateLimitStore = {
   incr(key: string): Promise<number>;

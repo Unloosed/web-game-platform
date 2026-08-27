@@ -10,9 +10,11 @@
     "dev:web": "pnpm --dir apps/web exec vite --host 0.0.0.0",
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.check.json && pnpm --dir apps/web exec tsc -b",
     "test:e2e": "node --env-file=.env ./node_modules/@playwright/test/cli.js test",
     "build": "pnpm --dir apps/web build",
     "lint": "eslint .",
+    "format": "prettier --write .",
     "db:reset": "docker compose down -v && docker compose up -d postgres redis"
   },
   "devDependencies": {

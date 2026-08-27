@@ -185,6 +185,33 @@ const http = createServer(async (req, res) => {
       return;
     }
 
+    // Applies a mute decision to every live socket of the account so chat
+    // enforcement does not wait for the next handshake.
+    if (
+      req.method === "POST" &&
+      /^\/internal\/users\/[^/]+\/mute$/.test(url.pathname)
+    ) {
+      const userId = decodeURIComponent(url.pathname.split("/")[3]);
+      try {
+        const body = z
+          .object({ muted: z.boolean() })
+          .parse(await readJson(req));
+
+        let sockets = 0;
+        for (const socket of socketsByUser.get(userId) ?? []) {
+          socket.data.muted = body.muted;
+          sockets += 1;
+        }
+        log("info", "internal_mute_change", { userId, ...body, sockets });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"ok":true}');
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end('{"error":"invalid_mute_request"}');
+      }
+      return;
+    }
+
     // Room-scoped moderation kick: removes the player immediately (no
     // reconnect grace) and drops their sockets bound to this room.
     if (
@@ -411,6 +438,7 @@ io.on("connection", (socket) => {
     metrics.increment("game_socket_connects_total");
 
     socket.data.roomCode = roomCode.data;
+    socket.data.muted = identity.muted;
     socket.join(roomCode.data);
     trackSocket(userId, socket);
     trackIp(socket.handshake.address, socket);
@@ -431,9 +459,12 @@ io.on("connection", (socket) => {
       }
     });
 
-    // Per-socket gameplay input throttle: 40 inputs per rolling second.
-    let inputWindowStart = Date.now();
-    let inputCount = 0;
+    // Per-socket gameplay input throttle. Each accepted input advances the
+    // simulation by exactly one tick, so inputs are capped at the tick rate
+    // (20/s): without this, key-repeat speed or a macro would directly
+    // scale a player's movement speed. Bursts above that are rejected.
+    const inputMinIntervalMs = 50;
+    let lastInputAt = 0;
 
     socket.on("client_event", (raw: unknown) => {
       const event = clientEventSchema.safeParse(raw);
@@ -446,15 +477,11 @@ io.on("connection", (socket) => {
       if (event.data.type === "input") {
         if (event.data.direction === "none") return;
         const now = Date.now();
-        if (now - inputWindowStart >= 1_000) {
-          inputWindowStart = now;
-          inputCount = 0;
-        }
-        inputCount += 1;
-        if (inputCount > 40) {
+        if (now - lastInputAt < inputMinIntervalMs) {
           metrics.increment("game_inputs_rejected_total");
           return;
         }
+        lastInputAt = now;
         roomManager.move(roomCode.data, userId, event.data.direction);
         return;
       }
@@ -475,7 +502,8 @@ io.on("connection", (socket) => {
           at: Date.now(),
         });
       };
-      if (identity.muted) {
+      // Re-checked per message: admin mutes propagate to live sockets.
+      if (socket.data.muted) {
         metrics.increment("game_chat_rejected_total");
         return;
       }
@@ -518,7 +546,7 @@ io.on("connection", (socket) => {
     socket.on("disconnect", () => {
       untrackSocket(userId, socket);
       untrackIp(socket.handshake.address, socket);
-      roomManager.disconnect(roomCode.data, userId);
+      roomManager.disconnect(roomCode.data, userId, socket.id);
     });
   })();
 });

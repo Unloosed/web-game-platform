@@ -3,10 +3,19 @@ import {
   evaluateAchievements,
   isChatAllowed,
   MetricsRegistry,
+  newRoomCode,
   parseBannedWords,
   rateLimit,
   type RateLimitStore,
 } from "../src/index.js";
+
+describe("newRoomCode", () => {
+  it("always yields six uppercase alphanumeric characters", () => {
+    for (let i = 0; i < 2_000; i++) {
+      expect(newRoomCode()).toMatch(/^[A-Z0-9]{6}$/);
+    }
+  });
+});
 
 function fakeStore(): RateLimitStore & { data: Map<string, number> } {
   const data = new Map<string, number>();
