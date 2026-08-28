@@ -313,8 +313,8 @@ test.describe("Milestone 3/3.1 API behavior", () => {
             status: "completed",
             winnerUserId: host.id,
             results: [
-              { id: host.id, tags: 6 },
-              { id: guest.id, tags: 1 },
+              { userId: host.id, score: 6 },
+              { userId: guest.id, score: 1 },
             ],
           },
         },

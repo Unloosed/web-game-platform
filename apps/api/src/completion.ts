@@ -34,9 +34,9 @@ export async function persistMatchRecord(
   const matchId = match.rows[0].id as string;
 
   await runner.query(
-    `insert into match_players(match_id,user_id,tags)
-     select $1, r.id, r.tags
-     from jsonb_to_recordset($2::jsonb) as r(id uuid, tags integer)
+    `insert into match_players(match_id,user_id,score)
+     select $1, r."userId", r.score
+     from jsonb_to_recordset($2::jsonb) as r("userId" uuid, score integer)
      on conflict do nothing`,
     [matchId, JSON.stringify(results)],
   );

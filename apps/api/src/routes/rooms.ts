@@ -12,9 +12,17 @@ import {
   isChatAllowed,
   newRoomCode,
 } from "../../../../packages/platform/src/index.js";
+import {
+  gameIdSchema,
+  listGames,
+} from "../../../../packages/game-registry/src/index.js";
 import { persistMatchRecord } from "../completion.js";
 
 export async function roomRoutes(app: FastifyInstance): Promise<void> {
+  // Public catalog for the lobby's game selector; mirrors the server-side
+  // registry so the web app never hard-codes game ids.
+  app.get("/games", async () => ({ games: listGames() }));
+
   app.get("/rooms", async () => {
     const result = await db.query(
       `
@@ -22,6 +30,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
         id,
         code,
         name,
+        game_id AS "gameId",
         is_private AS "isPrivate",
         status,
         max_players AS "maxPlayers",
@@ -47,6 +56,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     const parsed = z
       .object({
         name: z.string().trim().min(1).max(64),
+        gameId: gameIdSchema.default("sample-tag"),
         isPrivate: z.boolean().default(false),
       })
       .safeParse(req.body);
@@ -56,7 +66,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       return {
         error: "invalid_room",
         message:
-          "Room name must contain between 1 and 64 non-whitespace characters.",
+          "Room name must contain between 1 and 64 non-whitespace characters and the game id must be registered.",
       };
     }
 
@@ -66,8 +76,8 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       try {
         r = (
           await db.query(
-            'insert into rooms(code,name,is_private,host_user_id) values($1,$2,$3,$4) returning id,code,name,is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId"',
-            [newRoomCode(), b.name, b.isPrivate, u.id],
+            'insert into rooms(code,name,game_id,is_private,host_user_id) values($1,$2,$3,$4,$5) returning id,code,name,game_id as "gameId",is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId"',
+            [newRoomCode(), b.name, b.gameId, b.isPrivate, u.id],
           )
         ).rows[0];
       } catch {
@@ -100,7 +110,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       .parse(req.body);
     const r = (
       await db.query(
-        'select id,code,name,is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId" from rooms where code=$1',
+        'select id,code,name,game_id as "gameId",is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId" from rooms where code=$1',
         [b.code],
       )
     ).rows[0];
@@ -151,7 +161,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     if (!u) return;
     const code = (req.params as any).code;
     const q = await db.query(
-      'select r.id,r.code,r.name,r.status,r.is_private as "isPrivate",r.max_players as "maxPlayers",r.host_user_id as "hostUserId",m.role from rooms r join room_members m on m.room_id=r.id where r.code=$1 and m.user_id=$2',
+      'select r.id,r.code,r.name,r.game_id as "gameId",r.status,r.is_private as "isPrivate",r.max_players as "maxPlayers",r.host_user_id as "hostUserId",m.role from rooms r join room_members m on m.room_id=r.id where r.code=$1 and m.user_id=$2',
       [code, u.id],
     );
     if (!q.rows[0]) {
@@ -214,7 +224,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     const b = z
       .object({
         results: z.array(
-          z.object({ id: z.string().uuid(), tags: z.number().int().nonnegative() }),
+          z.object({ userId: z.string().uuid(), score: z.number().int().nonnegative() }),
         ),
         winnerUserId: z.string().uuid().nullable(),
       })

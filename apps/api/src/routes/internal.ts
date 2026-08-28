@@ -32,8 +32,12 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       return { error: "account_banned" };
     }
 
-    const membership = await db.query<{ role: string; ready: boolean }>(
-      `select m.role, m.ready
+    const membership = await db.query<{
+      role: string;
+      ready: boolean;
+      gameId: string;
+    }>(
+      `select m.role, m.ready, r.game_id as "gameId"
        from rooms r join room_members m on m.room_id = r.id
        where r.code = $1 and m.user_id = $2
        limit 1`,
@@ -53,6 +57,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       host: role === "host",
       muted: !!(u.muted_until && u.muted_until > new Date()),
       ready: role === "spectator" ? false : (membership.rows[0]?.ready ?? false),
+      gameId: membership.rows[0].gameId,
     };
   });
 
@@ -66,8 +71,8 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
         results: z
           .array(
             z.object({
-              id: z.string().uuid(),
-              tags: z.number().int().nonnegative(),
+              userId: z.string().uuid(),
+              score: z.number().int().nonnegative(),
             }),
           )
           .optional(),

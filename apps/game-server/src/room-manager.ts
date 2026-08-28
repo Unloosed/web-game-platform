@@ -1,15 +1,9 @@
-import {
-  addPlayer,
-  canStartMatch,
-  initialState,
-  move,
-  results,
-  setReady as applyReady,
-  setSpectator as applySpectator,
-  tick,
-  type State,
-} from "../../../packages/sample-game/src/index.js";
-import type { Snapshot } from "../../../packages/protocol/src/index.js";
+import { DEFAULT_GAME_ID, getGame } from "../../../packages/game-registry/src/index.js";
+import type {
+  AnyGameDefinition,
+  AnyGameState,
+  Snapshot,
+} from "../../../packages/protocol/src/index.js";
 
 export type RoomPhase = "waiting" | "running" | "completed";
 
@@ -19,7 +13,7 @@ export type RoomLifecycleApi = {
     roomCode: string,
     input: {
       winnerUserId: string | null;
-      results: Array<{ id: string; tags: number }>;
+      results: Array<{ userId: string; score: number }>;
     },
   ): Promise<void>;
   deleteAbandonedWaitingRoom(roomCode: string): Promise<void>;
@@ -43,7 +37,9 @@ export type PlayerConnection = {
 };
 
 type RoomInstance = {
-  state: State;
+  /** Resolved from the room's persisted game id, not from any client. */
+  game: AnyGameDefinition;
+  state: AnyGameState;
   hostUserId: string | null;
   /** Live socket ids per user; a user may hold several (multi-tab). */
   connectedSocketIdsByUser: Map<string, Set<string>>;
@@ -72,11 +68,15 @@ export class RoomManager {
 
   constructor(private readonly options: RoomManagerOptions) {
     this.tickMs = options.tickMs ?? 50;
-    this.matchMs = options.matchMs ?? initialState().remainingMs;
+    this.matchMs = options.matchMs ?? 60_000;
   }
 
-  connect(roomCode: string, connection: PlayerConnection): Snapshot {
-    const room = this.getOrCreateRoom(roomCode);
+  connect(
+    roomCode: string,
+    connection: PlayerConnection,
+    gameId: string = DEFAULT_GAME_ID,
+  ): Snapshot {
+    const room = this.getOrCreateRoom(roomCode, gameId);
 
     this.cancelPendingRemoval(roomCode, connection.userId);
 
@@ -89,13 +89,12 @@ export class RoomManager {
         new Set([connection.socketId]),
       );
     }
-    room.state = addPlayer(
-      room.state,
-      connection.userId,
-      connection.displayName,
-      connection.spectator,
-      connection.ready,
-    );
+    room.state = room.game.addPlayer(room.state, {
+      userId: connection.userId,
+      displayName: connection.displayName,
+      spectator: connection.spectator,
+      ready: connection.ready,
+    });
 
     if (connection.host) {
       room.hostUserId = connection.userId;
@@ -130,16 +129,9 @@ export class RoomManager {
         return;
       }
 
-      const { [userId]: _removed, ...remainingPlayers } = current.state.players;
+      current.state = current.game.removePlayer(current.state, userId);
 
-      current.state = {
-        ...current.state,
-        players: remainingPlayers,
-        itPlayerId:
-          current.state.itPlayerId === userId ? null : current.state.itPlayerId,
-      };
-
-      if (Object.keys(current.state.players).length === 0) {
+      if (current.game.roster(current.state).length === 0) {
         this.discardRoom(roomCode, current);
         return;
       }
@@ -150,15 +142,28 @@ export class RoomManager {
     this.pendingRemoval.set(key, timer);
   }
 
-  move(
+  /**
+   * Validates and applies a game-specific input. The generic envelope was
+   * already checked by the transport; the room's game owns the payload
+   * schema. Returns null when the room or input is invalid.
+   */
+  input(
     roomCode: string,
     userId: string,
-    direction: "up" | "down" | "left" | "right",
+    raw: unknown,
   ): Snapshot | null {
     const room = this.rooms.get(roomCode);
     if (!room) return null;
 
-    room.state = move(room.state, userId, direction, 1 / 20);
+    const parsed = room.game.inputSchema.safeParse(raw);
+    if (!parsed.success) return null;
+
+    room.state = room.game.applyInput(
+      room.state,
+      userId,
+      parsed.data,
+      this.tickMs / 1000,
+    );
     return this.broadcast(roomCode);
   }
 
@@ -168,7 +173,7 @@ export class RoomManager {
     if (room.hostUserId !== userId || room.state.phase !== "waiting") {
       return false;
     }
-    if (!canStartMatch(room.state)) {
+    if (!room.game.canStartMatch(room.state)) {
       return false;
     }
 
@@ -182,7 +187,7 @@ export class RoomManager {
     if (room.hostUserId !== userId || room.state.phase !== "completed") {
       return false;
     }
-    if (!canStartMatch(room.state)) {
+    if (!room.game.canStartMatch(room.state)) {
       return false;
     }
 
@@ -195,10 +200,17 @@ export class RoomManager {
     const room = this.rooms.get(roomCode);
     if (!room) return null;
 
-    const previous = room.state.players[userId]?.ready ?? false;
-    room.state = applyReady(room.state, userId, ready);
+    const previous =
+      room.game
+        .roster(room.state)
+        .find((p) => p.id === userId)?.ready ?? false;
+    room.state = room.game.setReady(room.state, userId, ready);
 
-    if (room.state.players[userId]?.ready !== previous) {
+    if (
+      room.game
+        .roster(room.state)
+        .find((p) => p.id === userId)?.ready !== previous
+    ) {
       void this.options.api
         .persistReady(roomCode, userId, ready)
         .catch((error) => {
@@ -213,9 +225,14 @@ export class RoomManager {
   /** Server-authorized spectator role change for a live participant. */
   setSpectator(roomCode: string, userId: string, spectator: boolean): boolean {
     const room = this.rooms.get(roomCode);
-    if (!room || !room.state.players[userId]) return false;
+    if (
+      !room ||
+      !room.game.roster(room.state).some((p) => p.id === userId)
+    ) {
+      return false;
+    }
 
-    room.state = applySpectator(room.state, userId, spectator);
+    room.state = room.game.setSpectator(room.state, userId, spectator);
     this.broadcast(roomCode);
     return true;
   }
@@ -245,18 +262,18 @@ export class RoomManager {
   /** Immediately remove a player (moderation kick) without grace period. */
   kick(roomCode: string, userId: string): boolean {
     const room = this.rooms.get(roomCode);
-    if (!room || !room.state.players[userId]) return false;
+    if (
+      !room ||
+      !room.game.roster(room.state).some((p) => p.id === userId)
+    ) {
+      return false;
+    }
 
     this.cancelPendingRemoval(roomCode, userId);
     room.connectedSocketIdsByUser.delete(userId);
-    const { [userId]: _removed, ...remainingPlayers } = room.state.players;
-    room.state = {
-      ...room.state,
-      players: remainingPlayers,
-      itPlayerId: room.state.itPlayerId === userId ? null : room.state.itPlayerId,
-    };
+    room.state = room.game.removePlayer(room.state, userId);
 
-    if (Object.keys(remainingPlayers).length === 0) {
+    if (room.game.roster(room.state).length === 0) {
       this.discardRoom(roomCode, room);
       return true;
     }
@@ -315,12 +332,21 @@ export class RoomManager {
     }
   }
 
-  private getOrCreateRoom(roomCode: string): RoomInstance {
+  private getOrCreateRoom(
+    roomCode: string,
+    gameId: string,
+  ): RoomInstance {
     const existing = this.rooms.get(roomCode);
     if (existing) return existing;
 
+    const game = getGame(gameId);
+    if (!game) {
+      throw new Error(`Unknown game for room ${roomCode}: ${gameId}`);
+    }
+
     const room: RoomInstance = {
-      state: initialState(this.matchMs),
+      game,
+      state: game.createState(this.matchMs),
       hostUserId: null,
       connectedSocketIdsByUser: new Map(),
       timer: setInterval(() => {
@@ -329,20 +355,20 @@ export class RoomManager {
 
         const tickStart = performance.now();
         const previousPhase = current.state.phase;
-        current.state = tick(current.state, this.tickMs / 1000);
+        current.state = current.game.tick(current.state, this.tickMs / 1000);
 
         if (
           previousPhase !== "completed" &&
           current.state.phase === "completed"
         ) {
-          const finalResults = results(current.state);
+          const finalResults = current.game.getResults(current.state);
 
           void this.options.api
             .persistCompletion(roomCode, {
               winnerUserId: finalResults[0]?.id ?? null,
-              results: finalResults.map((player) => ({
-                id: player.id,
-                tags: player.tags,
+              results: finalResults.map((row) => ({
+                userId: row.id,
+                score: row.score,
               })),
             })
             .catch((error) => {
@@ -363,18 +389,17 @@ export class RoomManager {
   }
 
   private resetForMatch(roomCode: string, room: RoomInstance): void {
-    const priorPlayers = Object.values(room.state.players);
+    const priorPlayers = room.game.roster(room.state);
 
-    room.state = initialState(this.matchMs);
+    room.state = room.game.createState(this.matchMs);
 
     for (const player of priorPlayers) {
-      room.state = addPlayer(
-        room.state,
-        player.id,
-        player.name,
-        player.spectator,
-        player.ready,
-      );
+      room.state = room.game.addPlayer(room.state, {
+        userId: player.id,
+        displayName: player.name,
+        spectator: player.spectator,
+        ready: player.ready,
+      });
     }
 
     room.state.phase = "running";
@@ -398,15 +423,17 @@ export class RoomManager {
   }
 
   private snapshot(roomCode: string, room: RoomInstance): Snapshot {
+    const { state, game } = room;
     return {
       type: "snapshot",
       roomCode,
-      phase: room.state.phase,
-      remainingMs: room.state.remainingMs,
-      itPlayerId: room.state.itPlayerId,
-      players: Object.values(room.state.players),
-      ...(room.state.phase === "completed"
-        ? { results: results(room.state) }
+      game: game.metadata.id,
+      phase: state.phase,
+      remainingMs: state.remainingMs,
+      players: game.roster(state),
+      view: game.view(state),
+      ...(state.phase === "completed"
+        ? { results: game.getResults(state) }
         : {}),
     };
   }

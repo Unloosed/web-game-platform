@@ -15,7 +15,7 @@ export type QueryRunner = {
   ): Promise<{ rows: Record<string, unknown>[] }>;
 };
 
-export type CompletionResult = { id: string; tags: number };
+export type CompletionResult = { userId: string; score: number };
 
 export async function awardMatchAchievements(
   runner: QueryRunner,
@@ -25,16 +25,16 @@ export async function awardMatchAchievements(
 ): Promise<void> {
   const stats: MatchStats = {
     winnerUserId,
-    players: results.map((r) => ({ userId: r.id, tags: r.tags })),
+    players: results.map((r) => ({ userId: r.userId, score: r.score })),
   };
 
   for (const result of results) {
-    for (const code of evaluateAchievements(stats, result.id)) {
+    for (const code of evaluateAchievements(stats, result.userId)) {
       await runner.query(
         `insert into achievements(user_id, code, match_id)
          values ($1, $2, $3)
-         on conflict (user_id, code) do nothing`,
-        [result.id, code, matchId],
+       on conflict (user_id, code) do nothing`,
+      [result.userId, code, matchId],
       );
     }
   }

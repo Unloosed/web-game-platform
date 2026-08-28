@@ -269,22 +269,23 @@ describe("RoomManager", () => {
     const restarted = manager.getSnapshot(ROOM_CODE);
     expect(restarted?.phase).toBe("running");
     expect(restarted?.remainingMs).toBe(60_000);
-    expect(restarted?.itPlayerId).toBeNull();
+    expect(restarted?.game).toBe("sample-tag");
+    expect((restarted?.view as { itPlayerId: string | null }).itPlayerId).toBeNull();
     expect(restarted?.players).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: HOST_ID,
-          tags: 0,
+          score: 0,
           spectator: false,
         }),
         expect.objectContaining({
           id: PLAYER_ID,
-          tags: 0,
+          score: 0,
           spectator: false,
         }),
         expect.objectContaining({
           id: SPECTATOR_ID,
-          tags: 0,
+          score: 0,
           spectator: true,
         }),
       ]),
@@ -501,6 +502,95 @@ describe("RoomManager", () => {
     manager.kick(ROOM_CODE, PLAYER_ID);
     expect(manager.hasRoom(ROOM_CODE)).toBe(false);
     expect(api.archiveAbandonedRoom).toHaveBeenCalledWith(ROOM_CODE);
+
+    manager.dispose();
+  });
+
+  it("hosts the second game by persisted game id without platform changes", () => {
+    const { manager } = createManager();
+
+    manager.connect(
+      ROOM_CODE,
+      {
+        userId: HOST_ID,
+        displayName: "Host",
+        spectator: false,
+        host: true,
+        socketId: "host-socket",
+      },
+      "color-rush",
+    );
+    manager.connect(
+      ROOM_CODE,
+      {
+        userId: PLAYER_ID,
+        displayName: "Guest",
+        spectator: false,
+        host: false,
+        socketId: "guest-socket",
+      },
+      "color-rush",
+    );
+
+    const snapshot = manager.getSnapshot(ROOM_CODE);
+    expect(snapshot?.game).toBe("color-rush");
+    expect((snapshot?.view as { orbs: unknown[] }).orbs.length).toBeGreaterThan(0);
+
+    // Tag-style inputs are invalid for this game; rush-style dash applies.
+    expect(
+      manager.input(ROOM_CODE, HOST_ID, {
+        type: "input",
+        seq: 1,
+        direction: "up",
+      }),
+    ).toBeNull();
+
+    // Deterministic startup gates a rush match the same way.
+    manager.setReady(ROOM_CODE, HOST_ID, true);
+    manager.setReady(ROOM_CODE, PLAYER_ID, true);
+    expect(manager.startMatch(ROOM_CODE, HOST_ID)).toBe(true);
+
+    expect(manager.input(ROOM_CODE, HOST_ID, { type: "input", seq: 2, op: "dash" })).not.toBeNull();
+    expect(
+      (
+        (manager.getSnapshot(ROOM_CODE)?.view ?? {
+          players: [],
+        }) as { players: Array<{ id: string; dashing: boolean }> }
+      ).players.find((p) => p.id === HOST_ID)?.dashing,
+    ).toBe(true);
+
+    manager.dispose();
+  });
+
+  it("rejects inputs that fail the room's game schema without mutating state", () => {
+    const { manager } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+
+    const before = manager.getSnapshot(ROOM_CODE);
+    expect(manager.input(ROOM_CODE, HOST_ID, { type: "input", seq: 1 })).toBeNull();
+    expect(manager.input("UNKNOWN", HOST_ID, { type: "input", seq: 1, direction: "up" })).toBeNull();
+    expect(manager.getSnapshot(ROOM_CODE)).toEqual(before);
+
+    manager.dispose();
+  });
+
+  it("persists completion with generic score rows for any game", () => {
+    vi.useFakeTimers();
+
+    const { manager, api } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+    vi.advanceTimersByTime(61_000);
+
+    expect(api.persistCompletion).toHaveBeenCalledWith(ROOM_CODE, {
+      winnerUserId: expect.any(String),
+      results: expect.arrayContaining([
+        expect.objectContaining({ userId: expect.any(String), score: expect.any(Number) }),
+      ]),
+    });
 
     manager.dispose();
   });

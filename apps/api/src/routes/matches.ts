@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { db } from "../context.js";
+import { gameIdSchema } from "../../../../packages/game-registry/src/index.js";
 
 export async function matchRoutes(app: FastifyInstance): Promise<void> {
   app.get("/users/:id/matches", async (req) => {
@@ -10,10 +11,11 @@ export async function matchRoutes(app: FastifyInstance): Promise<void> {
         m.id,
         r.name as "roomName",
         r.code as "roomCode",
+        r.game_id as "gameId",
         m.winner_user_id as "winnerUserId",
         w.display_name as "winnerName",
         m.ended_at as "endedAt",
-        mp.tags,
+        mp.score,
         m.results
       from match_players mp
       join matches m on m.id = mp.match_id
@@ -46,22 +48,34 @@ export async function matchRoutes(app: FastifyInstance): Promise<void> {
     return { achievements: rows.rows };
   });
 
-  app.get("/leaderboard", async () => {
+  // Per-game dimension: ?game=<gameId> scopes the board to one game;
+  // without it the board aggregates across all games.
+  app.get("/leaderboard", async (req, reply) => {
+    const raw = (req.query as { game?: string }).game;
+    const game = raw === undefined || raw === "" ? null : gameIdSchema.safeParse(raw);
+    if (raw && !game?.success) {
+      reply.code(400);
+      return { error: "unknown_game" };
+    }
+
     const board = await db.query(
       `
       select
         u.id,
         u.display_name as "displayName",
         count(*)::int as "matchesPlayed",
-        coalesce(sum(mp.tags), 0)::int as "totalTags",
+        coalesce(sum(mp.score), 0)::int as "totalScore",
         count(*) filter (where m.winner_user_id = u.id)::int as "wins"
       from match_players mp
       join users u on u.id = mp.user_id
       join matches m on m.id = mp.match_id
+      join rooms r on r.id = m.room_id
+      where ($1::text is null or r.game_id = $1)
       group by u.id, u.display_name
-      order by "totalTags" desc, "wins" desc, u.display_name asc
+      order by "totalScore" desc, "wins" desc, u.display_name asc
       limit 25
     `,
+      [game?.success ? game.data : null],
     );
     return { leaderboard: board.rows };
   });

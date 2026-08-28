@@ -1,1007 +1,405 @@
 # Web Game Platform: Game Plugin and Integration Guide
 
-This guide explains how to add a game to the Web Game Platform without coupling it to platform internals. It targets advanced TypeScript developers building a browser game that needs ordinary React UI, 2D rendering, optional multiplayer, and server-authoritative simulation.
+This guide explains how to add a game to the Web Game Platform without touching
+generic room, tick, or protocol internals. It is written against the platform
+**as it actually is** (Milestone 5): a pnpm workspace whose shared packages live
+in `packages/` as plain source trees (no build step, imported by relative path),
+a Fastify API (`apps/api`), a Socket.IO game server (`apps/game-server`), a
+React web app (`apps/web`), and PostgreSQL accessed through raw parameterized
+SQL on `pg.Pool` (no ORM).
 
-The reference game is `@webgame/sample-game`, a top-down tag arena. A new game should follow the same package boundaries but must not copy its game-specific rules into API, room SDK, or generic client code.
+The reference implementations are:
+
+- `packages/sample-game` — **Tag Arena** (`sample-tag`), the original
+  server-authoritative tag game.
+- `packages/color-rush` — **Color Rush** (`color-rush`), the second reference
+  game that proves the plugin contract: different state, inputs, scoring, and
+  UI, registered and hosted with zero changes to platform internals.
+
+A new game should follow the same package boundaries but must never copy its
+game-specific rules into the API, room manager, protocol, or generic web
+chrome.
 
 ---
 
 # 1. Mental model
 
-A platform game has five distinct layers.
+A platform game has four distinct layers.
 
-| Layer | Responsibility | Must not own |
+| Layer | Owns | Must never own |
 | --- | --- | --- |
-| Game package | Rules, state, game-specific input, player views, assets, render view | Generic sessions, generic auth, direct DB access for platform data |
-| Core package | Game-agnostic contracts such as `GameDefinition`, players, room phases | Tag rules, game-specific UI |
-| Server SDK | Fixed tick loop, generic room/session helpers, snapshot lifecycle helpers | Game-specific collision and scoring |
-| Game server app | Authenticates live connections, loads room/game definition, routes input, broadcasts snapshots | Individual game rules |
-| Web app | App shell, lobby, settings, user/session UI, route selection | Authoritative state decisions |
+| Game package (`packages/<game>`) | State types, pure rules, the `GameDefinition` adapter, per-game Zod input schema, the client arena view | Generic sessions/auth, DB access, sockets, tick loop |
+| Core contract (`packages/protocol`) | `GameDefinition`, `Player`, `Snapshot`, phase types, generic event envelopes | Any specific game's rules or view payload |
+| Registry (`packages/game-registry`) | The single `gameId → definition` mapping, the validated id schema, lobby metadata | Game logic |
+| Platform (API, game server, web chrome) | Lifecycle, membership, transport, persistence, moderation, ready gating, scoreboard/results/chat UI | Game rules, game rendering |
 
-The authoritative server accepts **intent** from clients, validates it, mutates state through a game definition, and emits a player-safe snapshot. A browser renders state but must never decide score, collisions, victory, or room membership.
+The authoritative server accepts **intent** from clients, validates it
+(envelope by the platform, payload by the game), mutates state through the
+game definition on a fixed 20 Hz tick, and broadcasts a snapshot built from a
+**generic roster** plus a **game-specific view payload**.
 
 ```text
 Browser input
-  -> shared Zod validation
-  -> game-server authorization and room membership check
-  -> game-specific input schema validation
-  -> GameDefinition.applyInput
-  -> fixed tick GameDefinition.update
-  -> player-safe snapshot
-  -> browser rendering/UI
+  -> generic client_event envelope (packages/protocol clientEventSchema)
+  -> per-socket input throttle (50 ms)          [platform]
+  -> room's game inputSchema.safeParse          [game]
+  -> GameDefinition.applyInput(state, userId, input, dt)
+  -> fixed tick GameDefinition.tick(state, dt)  [RoomManager]
+  -> roster(state) + view(state) + results      [snapshot]
+  -> browser: generic chrome + registered arena view
 ```
 
 ---
 
 # 2. Package layout
 
-A new internal game lives in `packages/<game-package-name>`.
+A new internal game lives in `packages/<game-name>` as a plain source tree —
+matching the existing repo convention (no `package.json`; packages are
+imported by relative path and compiled by each app's tsconfig/vite).
 
 ```text
 packages/color-rush/
-├─ package.json
-├─ tsconfig.json
 ├─ src/
-│  ├─ index.ts
-│  ├─ shared/
-│  │  ├─ state.ts
-│  │  ├─ input.ts
-│  │  ├─ schemas.ts
-│  │  └─ constants.ts
-│  ├─ server/
-│  │  ├─ definition.ts
-│  │  ├─ rules.ts
-│  │  └─ results.ts
-│  ├─ client/
-│  │  ├─ ColorRushGameView.tsx
-│  │  ├─ renderModel.ts
-│  │  └─ assets.ts
-│  └─ test/
-│     ├─ rules.test.ts
-│     └─ definition.test.ts
-└─ README.md
+│  └─ index.ts          # state types, constants, pure rules, GameDefinition
+└─ test/
+   └─ rules.test.ts     # vitest unit tests for the rules + definition
 ```
 
-Use this separation deliberately:
+A larger game may split `src/` into `shared/` (importable by browser and
+server), `server/` (deterministic rules, no DOM/React), and `client/`
+(React/rendering). The two reference games keep everything in one `index.ts`
+because the surface is small — do what fits your game, but keep the
+server/browser split honest.
 
-- `shared/` may be imported by browser and server.
-- `server/` must stay deterministic where practical and must not depend on the DOM or React.
-- `client/` may use React, PixiJS, CSS, audio, browser APIs, and rendering adapters.
-- Tests belong close to the game’s rules.
+Rules of thumb:
+
+- Server rule code must stay deterministic and must not depend on the DOM,
+  React, sockets, or the database.
+- Tests belong close to the game's rules (`packages/<game>/test`).
+- The web app cannot import from `packages/` — mirror the view types locally
+  in `apps/web/src/main.tsx` (see section 9).
 
 ---
 
-# 3. Create package metadata
+# 3. The GameDefinition contract
 
-Example `packages/color-rush/package.json`:
+Defined once in `packages/protocol/src/index.ts`. A definition is a plain
+object of pure functions over your own state type.
 
-```json
-{
-  "name": "@webgame/color-rush",
-  "version": "0.1.0",
-  "private": true,
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "lint": "eslint src --ext .ts,.tsx",
-    "test": "vitest",
-    "format": "prettier --write src"
-  },
-  "dependencies": {
-    "@webgame/core": "workspace:*",
-    "@webgame/protocol": "workspace:*",
-    "zod": "^3.23.0"
-  },
-  "peerDependencies": {
-    "react": "^18.2.0"
-  },
-  "devDependencies": {
-    "@types/react": "^18.2.0",
-    "typescript": "^5.5.0",
-    "vitest": "^2.0.0"
-  }
-}
+```ts
+type GameDefinition<S extends AnyGameState, I> = {
+  metadata: GameMetadata;      // { id, name, description, minPlayers, maxPlayers }
+  inputSchema: z.ZodType<I>;   // strict schema for your input payloads
+
+  createState(matchMs: number): S;
+  addPlayer(state: S, player: { userId; displayName; spectator; ready? }): S;
+  removePlayer(state: S, userId: string): S;
+  setReady(state: S, userId: string, ready: boolean): S;
+  setSpectator(state: S, userId: string, spectator: boolean): S;
+  canStartMatch(state: S): boolean;
+  applyInput(state: S, userId: string, input: I, dtSeconds: number): S;
+  tick(state: S, dtSeconds: number): S;
+  roster(state: S): Player[];   // generic rows for scoreboard/chrome
+  view(state: S): unknown;      // game-specific render payload
+  getResults(state: S): Player[]; // sorted, non-spectators, on completion
+};
 ```
 
-Example `packages/color-rush/tsconfig.json`:
+### Hard requirements
 
-```json
-{
-  "extends": "../config/tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
-  },
-  "include": ["src"]
-}
-```
-
-Use `workspace:*` for internal packages where your package manager configuration supports it. It avoids publishing-version drift during local development.
+1. **State must extend `AnyGameState`**: `{ phase: GamePhase; remainingMs:
+   number }`. The platform reads exactly these two fields for lifecycle
+   transitions, the timer UI, and completion detection.
+2. **State must be serializable**: plain objects, arrays, strings, numbers,
+   booleans. No functions, class instances, Dates, Maps, Sets, or sockets.
+3. **Use the authenticated `userId` as the player key** — never the socket id.
+4. **Methods are declared with method syntax in the interface on purpose**;
+   keep your implementation assignable to `GameDefinition<AnyGameState,
+   unknown>` (the registry erases your types).
+5. **`tick` and `applyInput` must no-op outside `running`** — inputs and
+   scoring never mutate waiting/completed games. Revisit `tick(state, 0)`
+   safety for completed states.
+6. **`applyInput` receives intents, never results.** A client may send
+   `op: "dash"`; it may never send `score: 100` or a raw position.
+7. **`roster(state)`** maps your internal players to the generic row
+   `{ id, name, score, spectator, ready }`. `score` is game-defined (tags in
+   sample-tag, orbs collected in color-rush).
+8. **`view(state)`** carries everything only your arena renderer needs
+   (positions, colors, orb list). It may filter hidden information per game
+   later (per-player views are a future extension; today `view` is
+   room-global, so do not leak hidden info through it).
+9. **`getResults(state)`** returns non-spectator rows sorted best-first. The
+   platform persists row 0 as the winner and every row as
+   `{ userId, score }` in `match_players`.
+10. **Spectator rules**: `setSpectator` marks the flag; your `move`/scoring
+    code must ignore spectators. Spectators never count in `canStartMatch`.
+11. **Ready rules**: mirror the platform gate — `canStartMatch` is true only
+    with at least `metadata.minPlayers` non-spectators, all explicitly ready,
+    and readiness is immutable while `running`.
 
 ---
 
-# 4. Define game state and input
+# 4. Inputs: envelope vs payload
 
-## 4.1 State types
+The platform validates only the generic envelope (`type: "input"`, integer
+`seq ≥ 0`) plus the shared `chat` and `ready` events. Everything else in an
+input belongs to your game and is validated by your own strict schema, which
+the `RoomManager` runs via `inputSchema.safeParse` before `applyInput`.
 
-State must be explicit, serializable, and suitable for snapshots. Prefer objects, arrays, strings, numbers, booleans, and stable identifiers. Avoid functions, class instances, Dates, Maps, Sets, sockets, database clients, and browser references inside authoritative state.
+Tag Arena — direction movement only:
 
 ```ts
-// packages/color-rush/src/shared/state.ts
-export interface ColorRushPlayerState {
-  id: string;
-  displayName: string;
-  x: number;
-  y: number;
-  color: string;
-  score: number;
-  connected: boolean;
-}
-
-export interface OrbState {
-  id: string;
-  x: number;
-  y: number;
-  color: string;
-  collected: boolean;
-}
-
-export interface ColorRushGameState {
-  phase: 'waiting' | 'running' | 'completed';
-  players: Record<string, ColorRushPlayerState>;
-  orbs: Record<string, OrbState>;
-  roundNumber: number;
-  remainingTimeMs: number;
-  winnerPlayerId: string | null;
-}
-
-export interface ColorRushPlayerView {
-  phase: ColorRushGameState['phase'];
-  players: ColorRushPlayerState[];
-  orbs: OrbState[];
-  roundNumber: number;
-  remainingTimeMs: number;
-  winnerPlayerId: string | null;
-}
+tagInputSchema = z.object({
+  type: z.literal("input"), seq: z.number().int().nonnegative(),
+  direction: z.enum(["up", "down", "left", "right"]),
+});
 ```
 
-### State design rules
-
-- Use a stable logical player ID from the authenticated platform user, never socket ID, as the state key.
-- Keep authoritative state small; send a view/delta rather than internal history.
-- Store countdowns as a duration or tick count, not as browser-local timers.
-- Prefer a single match clock controlled in `update` over independent client timers.
-- Treat all fields visible to the client as public. Create a player-specific view if the game contains hidden information.
-
-## 4.2 Input schema and type
-
-Never cast `unknown` input straight into a game type. Define Zod schemas and use them at the game-server boundary.
+Color Rush — a discriminated union with a second action:
 
 ```ts
-// packages/color-rush/src/shared/input.ts
-import { z } from 'zod';
-
-export const movementDirectionSchema = z.enum(['up', 'down', 'left', 'right', 'none']);
-
-export const colorRushInputSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('move'),
-    direction: movementDirectionSchema
-  }),
-  z.object({
-    type: z.literal('collect'),
-    orbId: z.string().uuid()
-  }),
-  z.object({
-    type: z.literal('noop')
-  })
+colorRushInputSchema = z.discriminatedUnion("op", [
+  z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
+             op: z.literal("move"), direction: directionSchema }),
+  z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
+             op: z.literal("dash") }),
 ]);
-
-export type ColorRushInput = z.infer<typeof colorRushInputSchema>;
 ```
 
-Input is an **intent**, not a result. A client may request `collect` but the server checks that the orb exists, is uncollected, and is close enough to the player. The client never submits `score: 100`.
+Standards:
+
+- **Strict schemas**: unknown fields must fail. Do not `.passthrough()` your
+  game schema.
+- **Rate of inputs is capped by the platform** (one accepted input per 50 ms
+  per socket, matching the 20 Hz tick) — do not design mechanics that need
+  more.
+- Movement advances on accepted input (`dt = 1/20 s`), and physics progression
+  (cooldowns, boosts) decrements in `tick`. Color Rush's dash works exactly
+  this way; copy that pattern for timed abilities.
 
 ---
 
-# 5. Implement a GameDefinition
+# 5. Register the game
 
-`GameDefinition<TState, TPlayerView, TInput>` is the core game extension point.
-
-```ts
-interface GameDefinition<TState, TPlayerState, TInput> {
-  metadata: GameMetadata;
-  roomConfig: RoomConfig;
-  initialState: () => TState;
-  applyInput: (params: {
-    state: TState;
-    playerId: string;
-    input: TInput;
-    dt: number;
-  }) => TState;
-  update: (params: { state: TState; dt: number }) => TState;
-  canPlayerJoin: (params: { state: TState; playerCount: number }) => boolean;
-  getPlayerView: (params: { state: TState; playerId: string }) => TPlayerState;
-}
-```
-
-A definition should be a mostly pure function collection. Each operation receives state and returns next state. This makes rule testing straightforward and makes future replay/debug tooling possible.
-
-## 5.1 Constants and helpers
+### 5.1 Server registry — `packages/game-registry/src/index.ts`
 
 ```ts
-// packages/color-rush/src/shared/constants.ts
-export const ARENA_WIDTH = 800;
-export const ARENA_HEIGHT = 600;
-export const PLAYER_RADIUS = 16;
-export const PLAYER_SPEED = 180;
-export const MATCH_DURATION_MS = 90_000;
-export const COLLECT_DISTANCE = 28;
-```
+import { sampleTagGame } from "../../sample-game/src/index.js";
+import { colorRushGame } from "../../color-rush/src/index.js";
 
-```ts
-// packages/color-rush/src/server/rules.ts
-import type { ColorRushPlayerState, OrbState } from '../shared/state';
-import {
-  ARENA_HEIGHT,
-  ARENA_WIDTH,
-  COLLECT_DISTANCE,
-  PLAYER_RADIUS,
-  PLAYER_SPEED
-} from '../shared/constants';
-
-export function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-export function movePlayer(
-  player: ColorRushPlayerState,
-  direction: 'up' | 'down' | 'left' | 'right' | 'none',
-  dt: number,
-): ColorRushPlayerState {
-  let dx = 0;
-  let dy = 0;
-
-  if (direction === 'up') dy = -1;
-  if (direction === 'down') dy = 1;
-  if (direction === 'left') dx = -1;
-  if (direction === 'right') dx = 1;
-
-  return {
-    ...player,
-    x: clamp(player.x + dx * PLAYER_SPEED * dt, PLAYER_RADIUS, ARENA_WIDTH - PLAYER_RADIUS),
-    y: clamp(player.y + dy * PLAYER_SPEED * dt, PLAYER_RADIUS, ARENA_HEIGHT - PLAYER_RADIUS)
-  };
-}
-
-export function canCollect(player: ColorRushPlayerState, orb: OrbState): boolean {
-  const dx = player.x - orb.x;
-  const dy = player.y - orb.y;
-  return dx * dx + dy * dy <= COLLECT_DISTANCE * COLLECT_DISTANCE;
-}
-```
-
-## 5.2 Full definition example
-
-```ts
-// packages/color-rush/src/server/definition.ts
-import type { GameDefinition } from '@webgame/core';
-import type { ColorRushInput } from '../shared/input';
-import {
-  MATCH_DURATION_MS
-} from '../shared/constants';
-import type {
-  ColorRushGameState,
-  ColorRushPlayerState,
-  ColorRushPlayerView
-} from '../shared/state';
-import { canCollect, movePlayer } from './rules';
-
-function createPlayer(playerId: string): ColorRushPlayerState {
-  return {
-    id: playerId,
-    displayName: playerId,
-    x: 400,
-    y: 300,
-    color: '#60a5fa',
-    score: 0,
-    connected: true
-  };
-}
-
-export const colorRushDefinition: GameDefinition<
-  ColorRushGameState,
-  ColorRushPlayerView,
-  ColorRushInput
-> = {
-  metadata: {
-    id: 'color-rush',
-    name: 'Color Rush',
-    description: 'Collect server-validated orbs before time expires.',
-    version: '0.1.0'
-  },
-
-  roomConfig: {
-    id: 'color-rush-default',
-    maxPlayers: 4,
-    minPlayersToStart: 2,
-    tickRate: 30,
-    allowSpectators: true,
-    reconnectTimeoutMs: 15_000
-  },
-
-  initialState: () => ({
-    phase: 'waiting',
-    players: {},
-    orbs: {},
-    roundNumber: 1,
-    remainingTimeMs: MATCH_DURATION_MS,
-    winnerPlayerId: null
-  }),
-
-  applyInput: ({ state, playerId, input, dt }) => {
-    if (state.phase !== 'running') {
-      return state;
-    }
-
-    const player = state.players[playerId] ?? createPlayer(playerId);
-    const players = { ...state.players, [playerId]: player };
-    const orbs = { ...state.orbs };
-
-    if (input.type === 'move') {
-      players[playerId] = movePlayer(player, input.direction, dt);
-    }
-
-    if (input.type === 'collect') {
-      const orb = orbs[input.orbId];
-      if (orb && !orb.collected && canCollect(player, orb)) {
-        orbs[input.orbId] = { ...orb, collected: true };
-        players[playerId] = { ...player, score: player.score + 1 };
-      }
-    }
-
-    return {
-      ...state,
-      players,
-      orbs
-    };
-  },
-
-  update: ({ state, dt }) => {
-    if (state.phase !== 'running') {
-      return state;
-    }
-
-    const remainingTimeMs = Math.max(0, state.remainingTimeMs - dt * 1000);
-    if (remainingTimeMs > 0) {
-      return { ...state, remainingTimeMs };
-    }
-
-    const ranked = Object.values(state.players).sort((a, b) => b.score - a.score);
-    return {
-      ...state,
-      remainingTimeMs: 0,
-      phase: 'completed',
-      winnerPlayerId: ranked[0]?.id ?? null
-    };
-  },
-
-  canPlayerJoin: ({ state, playerCount }) => {
-    return state.phase === 'waiting' && playerCount < 4;
-  },
-
-  getPlayerView: ({ state }) => ({
-    phase: state.phase,
-    players: Object.values(state.players),
-    orbs: Object.values(state.orbs).filter((orb) => !orb.collected),
-    roundNumber: state.roundNumber,
-    remainingTimeMs: state.remainingTimeMs,
-    winnerPlayerId: state.winnerPlayerId
-  })
-};
-```
-
-The exact current `GameDefinition` contract may evolve during the room lifecycle repair. Keep game-specific code behind this adapter so platform contract changes are localized.
-
----
-
-# 6. Register the game
-
-A production-quality platform must use a registry, rather than a hard-coded `if` or room-code naming convention.
-
-## 6.1 Registry contract
-
-```ts
-// apps/game-server/src/games/registry.ts
-import type { GameDefinition } from '@webgame/core';
-import { sampleGameDefinition } from '@webgame/sample-game';
-import { colorRushDefinition } from '@webgame/color-rush';
-
-export interface RegisteredGame {
-  id: string;
-  definition: GameDefinition<unknown, unknown, unknown>;
-  inputSchema: {
-    safeParse(value: unknown): { success: boolean; data?: unknown };
-  };
-}
-
-export const gamesRegistry: Record<string, RegisteredGame> = {
-  'sample-tag': {
-    id: 'sample-tag',
-    definition: sampleGameDefinition,
-    inputSchema: {
-      safeParse: (value) => ({ success: true, data: value })
-    }
-  },
-  'color-rush': {
-    id: 'color-rush',
-    definition: colorRushDefinition,
-    inputSchema: {
-      safeParse: (value) => colorRushInputSchema.safeParse(value)
-    }
-  }
+export const gameRegistry: Record<string, AnyGameDefinition> = {
+  [sampleTagGame.metadata.id]: sampleTagGame,
+  [colorRushGame.metadata.id]: colorRushGame,
 };
 
-export function getRegisteredGame(gameId: string): RegisteredGame {
-  const game = gamesRegistry[gameId];
-  if (!game) {
-    throw new Error(`Unsupported game: ${gameId}`);
-  }
-  return game;
-}
+export const DEFAULT_GAME_ID = sampleTagGame.metadata.id;
+export const gameIdSchema = z.string().refine((id) => id in gameRegistry);
+export function getGame(id: string) { ... }
+export function listGames(): GameMetadata[] { ... }
 ```
 
-In a later strongly typed version, use generic registration helpers so the registry preserves each game’s input and state type. The key design point is that API and realtime room routing choose a game from a trusted server-side registry.
+Add one import and one entry. This is the **only** platform-side edit needed
+to install a game on the server.
 
-## 6.2 Persist `gameId` on rooms
+### 5.2 Database
 
-Add a `game_id` field to durable rooms.
+`rooms.game_id` (migration `005-milestone-5-game-registry.sql`) already
+persists the game per room and defaults to `sample-tag`. No schema change is
+needed for a new game: the id is validated against the registry, not an enum
+in SQL.
 
-```sql
-ALTER TABLE rooms
-ADD COLUMN game_id VARCHAR(64) NOT NULL DEFAULT 'sample-tag';
-```
+### 5.3 API
 
-Update the Drizzle schema:
-
-```ts
-export const rooms = pgTable('rooms', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  code: varchar('code', { length: 8 }).notNull().unique(),
-  gameId: varchar('game_id', { length: 64 }).notNull().default('sample-tag'),
-  name: varchar('name', { length: 64 }).notNull(),
-  // remaining existing fields
-});
-```
-
-Validate room creation:
-
-```ts
-const createRoomBodySchema = z.object({
-  name: z.string().min(1).max(64),
-  gameId: z.enum(['sample-tag', 'color-rush']).default('sample-tag'),
-  isPrivate: z.boolean().default(false),
-  maxPlayers: z.number().int().min(2).max(16).default(8)
-});
-```
-
-Do not trust `gameId` passed directly by the Socket.IO client. The realtime server should obtain a room’s persisted game ID through a trusted API/service lookup or a synchronized cache.
+Nothing to do. `POST /rooms` validates `gameId` with `gameIdSchema` (so an
+unknown id is a 400), `GET /games` lists `listGames()` for the lobby, and the
+socket-verify endpoint returns the room's persisted `gameId` to the game
+server, which resolves the definition from the registry. **The realtime
+server never trusts a game id from the client** — it only uses the value the
+API read from PostgreSQL.
 
 ---
 
-# 7. Realtime server integration
+# 6. Web client view
 
-## 7.1 Authenticate before joining
-
-The Socket.IO handshake should receive an API-issued session cookie or short-lived websocket token. The game server resolves the authenticated user before creating or reconnecting a room player.
-
-```ts
-interface AuthenticatedSocketContext {
-  userId: string;
-  displayName: string;
-  role: 'guest' | 'player' | 'moderator' | 'admin';
-}
-```
-
-The game server should then validate:
-
-1. The room exists.
-2. The user is permitted to view or join it.
-3. The room is in a joinable phase.
-4. The player count permits a non-spectator entrant.
-5. The request is spectator-eligible if spectator mode is requested.
-
-## 7.2 Validate game-specific input
-
-Generic protocol validation proves that the message is an `input` envelope. The selected game’s input schema proves that the inner payload is valid.
-
-```ts
-socket.on('client_event', (raw: unknown) => {
-  const envelopeResult = clientToServerBaseSchema.safeParse(raw);
-  if (!envelopeResult.success) {
-    socket.emit('server_event', {
-      type: 'error',
-      code: 'invalid_protocol',
-      message: 'Malformed client event.'
-    });
-    return;
-  }
-
-  const event = envelopeResult.data;
-  if (event.type !== 'input') {
-    return;
-  }
-
-  if (session.isSpectator) {
-    socket.emit('server_event', {
-      type: 'error',
-      code: 'spectator_input_forbidden',
-      message: 'Spectators cannot send game input.'
-    });
-    return;
-  }
-
-  const parsedInput = room.registeredGame.inputSchema.safeParse(event.payload);
-  if (!parsedInput.success) {
-    socket.emit('server_event', {
-      type: 'error',
-      code: 'invalid_game_input',
-      message: 'Input is invalid for this game.'
-    });
-    return;
-  }
-
-  room.applyInput(session.connectionId, parsedInput.data, room.fixedDtSeconds);
-});
-```
-
-## 7.3 Lifecycle gating
-
-The server SDK should reject game input if the room is not `running`.
-
-```ts
-if (room.phase !== 'running') {
-  return;
-}
-```
-
-Do not leave this entirely to game code. The platform owns permission and lifecycle gates; the game owns its gameplay semantics.
-
-## 7.4 Snapshots
-
-The server computes one state update at a fixed rate, then serializes a game-specific player view.
-
-```ts
-const playerView = room.game.getPlayerView({
-  state: room.state,
-  playerId: playerSession.player.userId
-});
-
-socket.emit('server_event', {
-  type: 'snapshot',
-  roomId: room.id,
-  serverTime: Date.now(),
-  state: playerView,
-  lastInputSeq: playerSession.lastAcceptedInputSeq
-});
-```
-
-For games with fog-of-war or hidden cards, call `getPlayerView` separately for each user. For games with universally visible state, generate once and broadcast to the room.
-
----
-
-# 8. Browser client integration
-
-The platform’s `GameClient` handles generic socket connection and event routing. A game client component turns its snapshot into UI and rendering state.
-
-## 8.1 Basic React view
+The web app mirrors types locally (it deliberately does not import from
+`packages/`) and keeps a client-side registry in `apps/web/src/main.tsx`:
 
 ```tsx
-// packages/color-rush/src/client/ColorRushGameView.tsx
-import { useEffect, useRef, useState } from 'react';
-import { GameClient, KeyboardInput } from '@webgame/game-client';
-import type { ColorRushPlayerView } from '../shared/state';
-
-interface Props {
-  serverUrl: string;
-  roomCode: string;
-  user: { id: string; displayName: string };
-  spectator: boolean;
-}
-
-export function ColorRushGameView({ serverUrl, roomCode, user, spectator }: Props): JSX.Element {
-  const [view, setView] = useState<ColorRushPlayerView | null>(null);
-  const clientRef = useRef<GameClient | null>(null);
-
-  useEffect(() => {
-    const client = new GameClient({
-      serverUrl,
-      roomId: roomCode,
-      userId: user.id,
-      displayName: user.displayName,
-      spectator
-    });
-
-    client.onRender((snapshot) => {
-      setView(snapshot as unknown as ColorRushPlayerView);
-    });
-    client.connect();
-    clientRef.current = client;
-
-    if (spectator) {
-      return () => client.disconnect();
-    }
-
-    const input = new KeyboardInput();
-    input.on(({ seq, direction }) => {
-      client.sendInput({
-        seq,
-        direction
-      });
-    });
-
-    return () => {
-      input.dispose();
-      client.disconnect();
-    };
-  }, [roomCode, serverUrl, spectator, user.displayName, user.id]);
-
-  if (!view) {
-    return <p>Connecting to game…</p>;
-  }
-
-  return (
-    <section>
-      <header>
-        <h2>Color Rush — Round {view.roundNumber}</h2>
-        <p>Time remaining: {Math.ceil(view.remainingTimeMs / 1000)} seconds</p>
-      </header>
-      <div role="application" aria-label="Color Rush arena">
-        {view.players.map((player) => (
-          <div key={player.id}>
-            {player.displayName}: {player.score}
-          </div>
-        ))}
-      </div>
-      {view.phase === 'completed' && (
-        <p>{view.winnerPlayerId === user.id ? 'You win!' : 'Match complete.'}</p>
-      )}
-    </section>
-  );
-}
+const gameViews: Record<string, React.ComponentType<ArenaProps>> = {
+  "sample-tag": TagArena,
+  "color-rush": ColorRushArena,
+};
 ```
 
-This first version deliberately uses normal React DOM rendering. Use it to prove input, state, lifecycle, accessibility, and networking before adding rendering complexity.
-
-## 8.2 PixiJS renderer adapter
-
-When the game benefits from a canvas renderer, isolate PixiJS in the game package or an adapter package. Do not put Pixi-specific code in `@webgame/core`.
-
-```ts
-// packages/color-rush/src/client/pixiRenderer.ts
-import { Application, Container, Graphics } from 'pixi.js';
-import type { ColorRushPlayerView } from '../shared/state';
-
-export class ColorRushPixiRenderer {
-  private readonly app: Application;
-  private readonly world = new Container();
-  private readonly playerSprites = new Map<string, Graphics>();
-
-  constructor(host: HTMLElement) {
-    this.app = new Application();
-    void this.app.init({ width: 800, height: 600, background: '#111827' }).then(() => {
-      host.appendChild(this.app.canvas);
-      this.app.stage.addChild(this.world);
-    });
-  }
-
-  render(view: ColorRushPlayerView): void {
-    for (const player of view.players) {
-      let sprite = this.playerSprites.get(player.id);
-      if (!sprite) {
-        sprite = new Graphics();
-        this.playerSprites.set(player.id, sprite);
-        this.world.addChild(sprite);
-      }
-      sprite.clear();
-      sprite.circle(0, 0, 16);
-      sprite.fill(player.color);
-      sprite.x = player.x;
-      sprite.y = player.y;
-    }
-  }
-
-  destroy(): void {
-    this.app.destroy(true);
-  }
-}
-```
-
-Maintain the distinction:
-
-- Authoritative position lives in server snapshot state.
-- Render interpolation may create a smooth visual position client-side.
-- Render interpolation must never be reported back as authoritative position.
-
----
-
-# 9. Menus, settings, dashboards, and normal web UI
-
-A game module does not need to place every screen inside a canvas. Use standard React pages and components for:
-
-- Pre-match instructions and tutorials.
-- Inventory and loadout selection.
-- Social menus and friend/invite controls.
-- Match settings.
-- Accessibility controls.
-- Scoreboards, chat, notifications, and results.
-- Admin/moderation controls.
-
-A game package can export route components:
-
-```ts
-export { ColorRushGameView } from './client/ColorRushGameView';
-export { ColorRushInstructionsPage } from './client/ColorRushInstructionsPage';
-export { colorRushDefinition } from './server/definition';
-```
-
-The platform web application chooses these components from the game registry.
+`ArenaProps` gives your component everything the game-specific UI needs:
 
 ```tsx
-const gamePageById: Record<string, React.ComponentType<GameRoomProps>> = {
-  'sample-tag': SampleTagRoomPage,
-  'color-rush': ColorRushRoomPage
+type ArenaProps = {
+  snap: Snap;          // latest snapshot (players: generic roster, view: unknown)
+  spectator: boolean;  // spectators get no input listeners
+  sendInput: (input: Record<string, unknown>) => void;
 };
 ```
 
-Keep global design tokens, buttons, modals, forms, toasts, focus management, reduced-motion behavior, and responsive layout in `@webgame/ui` or the host web app. That ensures all games have a consistent accessible application shell.
+Your arena component:
+
+1. Casts `snap.view` to your local mirrored view type.
+2. Adds its own keyboard/pointer listeners and calls `sendInput` with
+   **schema-valid payloads** (the server re-validates everything).
+3. Renders only; it never decides score, collisions, or completion.
+4. Keeps a stable `data-testid` (e.g. `color-rush-arena`) for E2E.
+
+The generic room chrome — invite code, spectator toggle, ready-up, start/
+restart (host-only, readiness-gated), timer, scoreboard (sorted by `score`),
+results, chat — is rendered by the platform for every game. Do not duplicate
+it inside an arena view.
+
+The lobby's game selector and the public-room list are registry-driven via
+`GET /games`; they render new games automatically once the server registry
+and the `gameViews` entry exist.
 
 ---
 
-# 10. Single-player support
+# 7. Lifecycle contract
 
-A single-player game should use the same `GameDefinition` and fixed-step simulation rules.
+The platform drives this exact flow for every game; your definition must make
+it correct:
 
-Recommended modes:
-
-1. **Local/offline mode**: browser runs a local simulation adapter for a truly offline game. Use only where cheating does not matter or saves are validated later.
-2. **Hosted single-player mode**: create a room with one player and run authoritative simulation on the server. This provides durable saves, anti-cheat validation, achievements, and consistent result storage.
-3. **Practice mode**: use the hosted engine with bots or no opponents.
-
-Do not fork your entire rule set for multiplayer vs single player. Structure the game definition so player count is a configuration/rules constraint:
-
-```ts
-roomConfig: {
-  maxPlayers: 1,
-  minPlayersToStart: 1,
-  tickRate: 30,
-  allowSpectators: false,
-  reconnectTimeoutMs: 15_000
-}
+```text
+create room (status=waiting, rooms.game_id persisted)
+  -> players join (membership + handshake verified; reconnect restores ready)
+  -> ready toggles (spectators rejected; mirrored to room_members.ready)
+  -> host start (waiting + canStartMatch) -> phase=running, status=running
+  -> 20 Hz tick loop; inputs applied between ticks
+  -> your tick sets phase=completed exactly once
+  -> platform persists {winnerUserId, results: [{userId, score}]}
+     idempotently (one match row per room) and broadcasts results
+  -> host rematch (completed + canStartMatch) -> fresh state, same rules
+  -> empty waiting room deleted; abandoned running room archived;
+     completed room kept for results
 ```
 
-A game that supports both can define queue/room templates, for example `solo`, `duo`, and `public` modes, while retaining shared state and rules.
+Answer these in your game README before registering:
+
+- What ends the game (timer / score limit / other)? The platform's
+  `GAME_MATCH_MS` env seeds `createState(matchMs)` — honor it (tests rely on
+  short matches).
+- Late join? (Current platform: joins close when the room is running; design
+  `addPlayer` accordingly.)
+- Spectators in each phase, reconnect behavior (grace window is platform
+  config `ROOM_RECONNECT_GRACE_MS`), and what a rematch resets.
 
 ---
 
-# 11. Persistence hooks
+# 8. Persistence, achievements, leaderboard
 
-Do not write to PostgreSQL inside every `update` tick. Game simulation should remain fast and isolated from slow I/O.
-
-Instead, define coarse-grained persistence events:
-
-```ts
-interface GamePersistenceHooks<TState, TResult> {
-  onMatchStarted?(params: { roomId: string; state: TState }): Promise<void>;
-  onMatchCompleted?(params: {
-    roomId: string;
-    state: TState;
-    result: TResult;
-  }): Promise<void>;
-  saveCheckpoint?(params: { roomId: string; state: TState }): Promise<void>;
-}
-```
-
-Use these at lifecycle boundaries:
-
-- Match starts: create durable match record.
-- Periodic checkpoint: persistent-world/save-game use case.
-- Match completes: transactionally write rankings/results/achievements.
-- Room archives: release volatile state after result save confirmation.
-
-For deterministic games, a more advanced future option is event sourcing: save accepted input events and periodic snapshots. Do not adopt it until replay/audit requirements justify the complexity.
+- Completion writes one durable `matches` row plus `match_players(match_id,
+  user_id, score)` — `score` is the game-defined number from your
+  `getResults`/`roster` rows. A game never writes to the database itself.
+- Achievements evaluate pure `MatchStats` (`{ winnerUserId, players:
+  [{userId, score}] }`) inside the completion transaction. `sharpshooter`
+  (score ≥ 5) is intentionally game-agnostic.
+- `GET /leaderboard?game=<gameId>` scopes the board by `rooms.game_id`;
+  without the parameter it aggregates across games. `GET
+  /users/:id/matches` rows carry `gameId`.
 
 ---
 
-# 12. Assets
+# 9. Testing requirements
 
-Each game should declare assets through a versioned manifest.
+Three layers, matching the reference games:
 
-```ts
-// packages/color-rush/src/client/assets.ts
-export interface GameAssetManifest {
-  gameId: string;
-  version: string;
-  assets: Array<{
-    id: string;
-    url: string;
-    kind: 'image' | 'audio' | 'json' | 'font';
-    integrity?: string;
-  }>;
-}
+1. **Rules unit tests** (`packages/<game>/test/rules.test.ts`, vitest). Cover
+   at minimum: phase gating (no input/tick effect outside `running`), bounds,
+   your scoring rule awards exactly once, spectator isolation, ready gating
+   and `canStartMatch`, timer completion + ranking, schema rejects foreign
+   payloads (a tag-style direction input must fail Color Rush's schema and
+   vice versa), and `removePlayer` side effects.
+2. **Room-manager integration** (`apps/game-server/test/room-manager.test.ts`).
+   The existing suite drives the platform gates generically. Add one test
+   that connects your game by id and asserts: snapshot `game` field, your
+   `view` shape, per-game input acceptance/rejection, and completion rows
+   shaped as `{userId, score}`.
+3. **Browser E2E** (`tests/e2e/<game>.spec.ts`, Playwright). Follow
+   `tests/e2e/color-rush.spec.ts`: sign in, select the game in the lobby,
+   create, second context joins by code, deterministic ready-up (start
+   disabled until all ready), start, assert your arena test id renders (and
+   the other games' does not), scoreboard shows both players, one game
+   action, timer visible.
 
-export const colorRushAssets: GameAssetManifest = {
-  gameId: 'color-rush',
-  version: '0.1.0',
-  assets: [
-    { id: 'orb-blue', url: '/games/color-rush/0.1.0/orb-blue.png', kind: 'image' },
-    { id: 'collect', url: '/games/color-rush/0.1.0/collect.ogg', kind: 'audio' }
-  ]
-};
-```
-
-The web host should preload this manifest before entering the game screen and present an accessible loading state. Future object-storage integration should map these URLs through a storage abstraction and version them immutably.
-
-For player-uploaded content, validate size, MIME type, format, authorization, and moderation policy before exposing assets. Do not allow arbitrary remote URLs in game manifests.
+Run: `pnpm test` (unit), `pnpm typecheck`, `pnpm lint`, and with infra
+running `pnpm test:e2e` (needs `pnpm db:reset` + `pnpm dev`, and a low
+`GAME_MATCH_MS` for completion specs).
 
 ---
 
-# 13. Lifecycle integration checklist
+# 10. Protocol versioning guidance
 
-Every game must declare how it participates in lifecycle:
+`PROTOCOL_VERSION` (in `packages/protocol`) is presented at every Socket.IO
+handshake; mismatches are rejected and counted.
 
-- What state represents `waiting`, `ready`, `running`, `paused`, and `completed`?
-- Does the game allow new players only in waiting, or late join during running?
-- Are spectators allowed in each phase?
-- What minimum player count is required?
-- Which players must ready before host start?
-- What ends a game: timer, score threshold, surrender, all players disconnected, or host action?
-- What output must be persisted at completion?
-- Does the game support reconnect? For how long?
-
-Example completion result shape:
-
-```ts
-export interface ColorRushResult {
-  reason: 'timer_expired' | 'score_limit' | 'forfeit' | 'cancelled';
-  winnerPlayerId: string | null;
-  rankings: Array<{
-    playerId: string;
-    rank: number;
-    score: number;
-  }>;
-}
-```
-
-The game server, not the browser, creates this result.
+- **Bump the version when the generic contract changes**: the snapshot
+  envelope fields (roster row shape, phase/timer semantics), the generic
+  event envelopes, or handshake auth. Milestone 5 bumped 1 → 2 for exactly
+  this reason (game-agnostic snapshots).
+- **Do not bump for game view changes**: `view` payloads are consumed only by
+  the matching client component, which deploys with the game package. Keep
+  `view` additive (new optional fields) where you can.
+- Adding a new game never bumps the version.
+- When you bump: update the mirrored constant in `apps/web/src/main.tsx`,
+  adjust protocol tests, and note the breaking change here.
 
 ---
 
-# 14. Testing requirements
-
-## 14.1 Unit tests: rules first
-
-```ts
-// packages/color-rush/src/test/rules.test.ts
-import { describe, expect, it } from 'vitest';
-import { canCollect, movePlayer } from '../server/rules';
-
-const player = {
-  id: 'player-1',
-  displayName: 'Player One',
-  x: 100,
-  y: 100,
-  color: '#60a5fa',
-  score: 0,
-  connected: true
-};
-
-describe('Color Rush rules', () => {
-  it('moves at the configured speed without exceeding bounds', () => {
-    const moved = movePlayer(player, 'right', 1);
-    expect(moved.x).toBeGreaterThan(player.x);
-  });
-
-  it('allows collection only inside collection distance', () => {
-    expect(canCollect(player, {
-      id: 'orb-1',
-      x: 110,
-      y: 100,
-      color: '#3b82f6',
-      collected: false
-    })).toBe(true);
-  });
-});
-```
-
-Test at minimum:
-
-- Input validation.
-- Initial state.
-- Movement/bounds/collision logic.
-- Scoring and victory conditions.
-- Timer expiry.
-- Lifecycle gating: input must not mutate completed/waiting games.
-- Spectator cannot alter state.
-- Reconnect does not create duplicate logical player state.
-
-## 14.2 Server integration tests
-
-Test room manager behavior with controlled sockets or direct manager APIs:
-
-- Valid member can join.
-- Non-member cannot join private room.
-- Correct game definition is loaded from `gameId`.
-- Input schema rejection returns an error and does not mutate state.
-- Start requires expected phase, host authorization, and readiness.
-- Completion produces exactly one persistence call.
-
-## 14.3 Browser E2E
-
-Every game should own a Playwright happy path:
-
-1. Sign in as host.
-2. Create room configured for the game ID.
-3. Open independent browser context and sign in as second player.
-4. Join via code.
-5. Ready/start game.
-6. Execute recognizable game action.
-7. Verify state/results in both browser views.
-8. Verify spectator behavior if supported.
-
-Avoid selectors tied to raw inline CSS or arbitrary DOM nesting. Add semantic labels and `data-testid` values where needed:
-
-```tsx
-<button data-testid="start-match">Start match</button>
-<div data-testid="scoreboard">...</div>
-<canvas data-testid="color-rush-canvas" />
-```
-
----
-
-# 15. Game author checklist
+# 11. Game author checklist
 
 Before registering a game:
 
-- [ ] Game package has no direct dependency on Fastify, Socket.IO server internals, or platform DB tables.
-- [ ] Shared inputs use Zod schemas.
-- [ ] Game state is serializable and avoids socket/browser/database objects.
-- [ ] Score, collisions, win conditions, and timer are server-authoritative.
-- [ ] `applyInput` does not trust client-provided positions, scores, target validity, or timestamps.
-- [ ] `update` uses fixed `dt` and handles completed state safely.
-- [ ] Player view contains only data the recipient is allowed to see.
-- [ ] Room lifecycle behavior is documented.
-- [ ] Spectator behavior is defined.
-- [ ] Reconnect behavior is defined.
-- [ ] Asset manifest is versioned.
-- [ ] Unit, integration, and E2E tests exist.
-- [ ] Accessibility requirements are considered for non-canvas controls and reduced-motion settings.
+- [ ] Package lives in `packages/<name>` with rules in `src/` and vitest tests
+      in `test/`; server code imports nothing from the DOM, React, sockets,
+      or DB.
+- [ ] State is serializable and keyed by authenticated `userId`.
+- [ ] State extends `{ phase; remainingMs }`; `tick`/`applyInput` no-op
+      outside `running`.
+- [ ] Inputs are intents with a strict Zod schema; client never submits
+      scores, positions, or target validity.
+- [ ] `roster`/`getResults` emit generic `{id, name, score, spectator, ready}`
+      rows; results sorted best-first, spectators excluded.
+- [ ] Spectators cannot move or score; they never count toward start.
+- [ ] Ready gating mirrors the platform rule; readiness frozen mid-match.
+- [ ] Completion is a single `phase = "completed"` transition; `GAME_MATCH_MS`
+      honored.
+- [ ] Unit + room-manager + E2E tests added (see section 9).
+- [ ] Registered in `packages/game-registry` and `gameViews` in the web app.
+- [ ] Arena view has a `data-testid`, respects `spectator`, and leaves
+      ready/start/timer/scoreboard/chat to the generic chrome.
+
+If every box ticks, the total platform diff for a third game is: the game
+package, one registry entry, one `gameViews` entry, and tests. Nothing in
+`apps/api`, `apps/game-server/src`, or `packages/protocol` changes.
 
 ---
 
-# 16. Common mistakes
+# 12. Common mistakes
 
 | Mistake | Why it fails | Correct approach |
 | --- | --- | --- |
-| Use socket ID as player ID | Reconnect changes socket ID | Use stable authenticated user ID as logical player ID |
-| Accept `x`, `y`, score, or hit result from client | Enables cheating | Client sends intent; server simulates and validates result |
-| Query Postgres every tick | Tick latency and DB load grow rapidly | Persist lifecycle events/checkpoints, not each simulation step |
-| Put PixiJS in core package | Locks platform to one renderer | Keep rendering adapter in game/client layer |
-| Use client timer for win condition | Browser can pause/modify clock | Server decrements game clock in fixed update loop |
-| Broadcast internal state to every player | Leaks hidden information | Generate a player-specific view/snapshot |
-| Delete player immediately on disconnect | Breaks reconnect | Mark disconnected, preserve logical state during grace period |
-| Trust `roomId` or `gameId` from handshake | Permits unauthorized routing | Validate room membership and load game ID from durable server data |
+| Socket id as player key | Reconnect changes socket id | Use the verified `userId` |
+| Accepting positions/scores from the client | Cheating; state divergence | Client sends intents; server simulates |
+| Forgetting `phase`/`remainingMs` in state | RoomManager cannot drive lifecycle or timer | Extend `AnyGameState` |
+| Mutating state in place | Snapshot history, idempotency, and tests rely on returns | Return new state objects |
+| Scoring from `applyInput` without re-validation | Macro/replay abuse; invalid targets | Derive scoring in `tick` (Color Rush collects by proximity) |
+| Reading `snap.view` in generic chrome | View is game-private | Chrome uses `players`/`results` roster rows only |
+| Trusting `gameId` from a socket client | Unauthorized routing | Resolve from `rooms.game_id` via the API verify call |
+| Writing to Postgres in `tick` | Tick latency and DB load | Persist only at completion (platform does this) |
+| Skipping the E2E spec for your game | Second-game regression net is the point of M5 | Copy `color-rush.spec.ts` |
 
 ---
 
-# 17. Recommended next implementation sequence
+# 13. Deployment notes
 
-1. Complete the Milestone 3.1 lifecycle repair.
-2. Introduce `game_id` in rooms and a server-side game registry.
-3. Convert the existing sample tag game to use the registry and explicit lifecycle hooks.
-4. Add `packages/color-rush` using this guide.
-5. Add lobby game selection, room routing, and one E2E scenario for Color Rush.
-6. Add match-result persistence and leaderboard adapters in Milestone 4.
-
-Following this sequence ensures the second game validates stable platform contracts rather than forcing a premature, sample-game-specific architecture.
+Games need no extra services or environment variables: both reference games
+share `GAME_MATCH_MS`, `ROOM_RECONNECT_GRACE_MS`, moderation, metrics,
+Redis-backed scaling, and the production Docker wiring. See
+`docs/deployment.md` for the platform-level setup and
+`docs/web-game-platform-milestone-roadmap.md` for the milestone history.

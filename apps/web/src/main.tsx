@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { io, Socket } from "socket.io-client";
 type User = { id: string; displayName: string; role?: string };
@@ -6,41 +6,64 @@ type Room = {
   id: string;
   code: string;
   name: string;
+  gameId: string;
   isPrivate: boolean;
   status: string;
   hostUserId: string;
   role?: string;
 };
+type GameMeta = {
+  id: string;
+  name: string;
+  description: string;
+  minPlayers: number;
+  maxPlayers: number;
+};
+// Generic roster row mirrored from packages/protocol Snapshot.
 type P = {
   id: string;
   name: string;
-  x: number;
-  y: number;
-  color: string;
-  tags: number;
+  score: number;
   spectator: boolean;
   ready: boolean;
 };
 type Snap = {
+  game: string;
   phase: string;
   remainingMs: number;
-  itPlayerId: string | null;
   players: P[];
+  view?: unknown;
   results?: P[];
+};
+// Per-game view payloads, mirrored from each game package.
+type TagView = {
+  players: Array<{ id: string; x: number; y: number; color: string }>;
+  itPlayerId: string | null;
+};
+type RushView = {
+  players: Array<{
+    id: string;
+    x: number;
+    y: number;
+    color: string;
+    dashing: boolean;
+  }>;
+  orbs: Array<{ id: string; x: number; y: number; color: string }>;
 };
 type LeaderboardRow = {
   id: string;
   displayName: string;
   matchesPlayed: number;
-  totalTags: number;
+  totalScore: number;
   wins: number;
 };
 type MatchRow = {
   id: string;
   roomName: string;
+  gameId: string;
   winnerName: string | null;
   endedAt: string;
-  tags: number;
+  score: number;
 };
 type AdminUser = {
   id: string;
@@ -77,7 +100,7 @@ type AdminReport = {
 };
 // Mirrors PROTOCOL_VERSION in packages/protocol; the web app keeps its
 // dependency-free local type mirrors, so the constant is mirrored too.
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:4000",
   GAME = import.meta.env.VITE_GAME_URL ?? "http://localhost:4100";
 const fetchApi = async (path: string, opts: RequestInit = {}) => {
@@ -90,6 +113,160 @@ const fetchApi = async (path: string, opts: RequestInit = {}) => {
   if (!r.ok) throw new Error(d.error ?? "request_failed");
   return d;
 };
+
+/**
+ * Client game registry: the web app's counterpart of the server-side
+ * game registry. Adding a game to the UI means adding an entry here —
+ * the room chrome (ready-up, start, timer, scoreboard, results, chat)
+ * is generic and never changes per game.
+ */
+type ArenaProps = {
+  snap: Snap;
+  spectator: boolean;
+  sendInput: (input: Record<string, unknown>) => void;
+};
+
+const useLatestSnap = (snap: Snap) => {
+  const latest = useRef(snap);
+  useEffect(() => {
+    latest.current = snap;
+  }, [snap]);
+  return latest;
+};
+
+function useMovementKeys(
+  spectator: boolean,
+  sendInput: ArenaProps["sendInput"],
+  onDirection: (direction: string, key: string) => void,
+) {
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      const d: Record<string, string> = {
+        ArrowUp: "up",
+        w: "up",
+        ArrowDown: "down",
+        s: "down",
+        ArrowLeft: "left",
+        a: "left",
+        ArrowRight: "right",
+        d: "right",
+      };
+      const direction = d[e.key];
+      if (!direction) return;
+      if (spectator) return;
+      onDirection(direction, e.key);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [spectator, sendInput, onDirection]);
+}
+
+function TagArena({ snap, spectator, sendInput }: ArenaProps) {
+  const latest = useLatestSnap(snap);
+  useMovementKeys(spectator, sendInput, (direction) => {
+    if (latest.current.phase !== "running") return;
+    sendInput({ type: "input", seq: Date.now(), direction });
+  });
+  const view = (snap.view ?? { players: [], itPlayerId: null }) as TagView;
+  return (
+    <div
+      data-testid="tag-arena"
+      style={{
+        position: "relative",
+        width: 400,
+        height: 400,
+        border: "2px solid #94a3b8",
+        background: "#071122",
+      }}
+    >
+      {view.players.map((p) => (
+        <div
+          title={snap.players.find((r) => r.id === p.id)?.name ?? p.id}
+          key={p.id}
+          style={{
+            position: "absolute",
+            width: 24,
+            height: 24,
+            left: p.x,
+            top: p.y,
+            background: p.color,
+            borderRadius: 6,
+            outline: view.itPlayerId === p.id ? "3px solid gold" : "none",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ColorRushArena({ snap, spectator, sendInput }: ArenaProps) {
+  const latest = useLatestSnap(snap);
+  useMovementKeys(spectator, sendInput, (direction) => {
+    if (latest.current.phase !== "running") return;
+    sendInput({ type: "input", seq: Date.now(), op: "move", direction });
+  });
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== " ") return;
+      e.preventDefault();
+      if (spectator || latest.current.phase !== "running") return;
+      sendInput({ type: "input", seq: Date.now(), op: "dash" });
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [spectator, sendInput, latest]);
+  const view = (snap.view ?? { players: [], orbs: [] }) as RushView;
+  return (
+    <div
+      data-testid="color-rush-arena"
+      style={{
+        position: "relative",
+        width: 480,
+        height: 480,
+        border: "2px solid #94a3b8",
+        background: "#0b1020",
+      }}
+    >
+      {view.orbs.map((o) => (
+        <div
+          key={o.id}
+          style={{
+            position: "absolute",
+            width: 20,
+            height: 20,
+            left: o.x - 10,
+            top: o.y - 10,
+            background: o.color,
+            borderRadius: "50%",
+            boxShadow: "0 0 8px " + o.color,
+          }}
+        />
+      ))}
+      {view.players.map((p) => (
+        <div
+          title={snap.players.find((r) => r.id === p.id)?.name ?? p.id}
+          key={p.id}
+          style={{
+            position: "absolute",
+            width: 22,
+            height: 22,
+            left: p.x - 11,
+            top: p.y - 11,
+            background: p.color,
+            borderRadius: "50%",
+            outline: p.dashing ? "3px solid white" : "none",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+const gameViews: Record<string, React.ComponentType<ArenaProps>> = {
+  "sample-tag": TagArena,
+  "color-rush": ColorRushArena,
+};
+
 function Login({ onLogin }: { onLogin: (u: User) => void }) {
   const [n, setN] = useState("");
   const [err, setErr] = useState("");
@@ -134,40 +311,70 @@ function Login({ onLogin }: { onLogin: (u: User) => void }) {
     </section>
   );
 }
-function Leaderboard() {
-  const [rows, setRows] = useState<LeaderboardRow[] | null>(null);
+
+function useGames() {
+  const [games, setGames] = useState<GameMeta[]>([]);
   useEffect(() => {
-    void fetchApi("/leaderboard")
+    void fetchApi("/games")
+      .then((r) => setGames(r.games as GameMeta[]))
+      .catch(() => setGames([]));
+  }, []);
+  return games;
+}
+
+function Leaderboard({ games }: { games: GameMeta[] }) {
+  const [rows, setRows] = useState<LeaderboardRow[] | null>(null);
+  const [game, setGame] = useState("");
+  useEffect(() => {
+    void fetchApi(`/leaderboard${game ? `?game=${game}` : ""}`)
       .then((r) => setRows(r.leaderboard))
       .catch(() => setRows([]));
-  }, []);
+  }, [game]);
   if (!rows) return <p>Loading leaderboard…</p>;
   if (rows.length === 0) return <p>No completed matches yet.</p>;
   return (
-    <table data-testid="leaderboard">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Player</th>
-          <th>Tags</th>
-          <th>Wins</th>
-          <th>Matches</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r, i) => (
-          <tr key={r.id}>
-            <td>{i + 1}</td>
-            <td>{r.displayName}</td>
-            <td>{r.totalTags}</td>
-            <td>{r.wins}</td>
-            <td>{r.matchesPlayed}</td>
+    <>
+      {games.length > 0 && (
+        <select
+          aria-label="Leaderboard game"
+          data-testid="leaderboard-game"
+          value={game}
+          onChange={(e) => setGame(e.target.value)}
+        >
+          <option value="">All games</option>
+          {games.map((g) => (
+            <option key={g.id} value={g.id}>
+              {g.name}
+            </option>
+          ))}
+        </select>
+      )}
+      <table data-testid="leaderboard">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Player</th>
+            <th>Score</th>
+            <th>Wins</th>
+            <th>Matches</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.id}>
+              <td>{i + 1}</td>
+              <td>{r.displayName}</td>
+              <td>{r.totalScore}</td>
+              <td>{r.wins}</td>
+              <td>{r.matchesPlayed}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
+
 function MyMatches({ userId }: { userId: string }) {
   const [rows, setRows] = useState<MatchRow[] | null>(null);
   useEffect(() => {
@@ -182,13 +389,15 @@ function MyMatches({ userId }: { userId: string }) {
       <ul>
         {rows.slice(0, 5).map((m) => (
           <li key={m.id}>
-            {m.roomName} — {m.tags} tags — winner: {m.winnerName ?? "none"}
+            {m.roomName} ({m.gameId}) — {m.score} pts — winner:{" "}
+            {m.winnerName ?? "none"}
           </li>
         ))}
       </ul>
     </section>
   );
 }
+
 function MyAchievements({ userId }: { userId: string }) {
   const [rows, setRows] = useState<Achievement[] | null>(null);
   useEffect(() => {
@@ -210,6 +419,7 @@ function MyAchievements({ userId }: { userId: string }) {
     </section>
   );
 }
+
 function Lobby({
   user,
   enter,
@@ -217,8 +427,10 @@ function Lobby({
   user: User;
   enter: (room: Room) => void;
 }) {
+  const games = useGames();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [name, setName] = useState("");
+  const [gameId, setGameId] = useState("sample-tag");
   const [priv, setPriv] = useState(false);
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
@@ -250,6 +462,7 @@ function Lobby({
         method: "POST",
         body: JSON.stringify({
           name: roomName,
+          gameId,
           isPrivate: priv,
         }),
       });
@@ -281,6 +494,9 @@ function Lobby({
     }
   };
 
+  const gameName = (id: string): string =>
+    games.find((g) => g.id === id)?.name ?? id;
+
   return (
     <section>
       <h1>Lobby</h1>
@@ -295,6 +511,21 @@ function Lobby({
           value={name}
           onChange={(event) => setName(event.target.value)}
         />
+
+        <select
+          aria-label="Game"
+          data-testid="game-select"
+          value={gameId}
+          onChange={(event) => setGameId(event.target.value)}
+        >
+          {(games.length > 0 ? games : [{ id: "sample-tag", name: "Tag Arena" }]).map(
+            (g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ),
+          )}
+        </select>
 
         <label>
           <input
@@ -336,7 +567,7 @@ function Lobby({
 
       {rooms.map((room) => (
         <div key={room.code}>
-          <strong>{room.name}</strong> ({room.code}){" "}
+          <strong>{room.name}</strong> ({room.code}) [{gameName(room.gameId)}]{" "}
           <button
             type="button"
             onClick={() => {
@@ -362,13 +593,14 @@ function Lobby({
       ))}
 
       <h2>Leaderboard</h2>
-      <Leaderboard />
+      <Leaderboard games={games} />
 
       <MyMatches userId={user.id} />
       <MyAchievements userId={user.id} />
     </section>
   );
 }
+
 function Game({
   user,
   room,
@@ -379,23 +611,28 @@ function Game({
   back: () => void;
 }) {
   const [snap, setSnap] = useState<Snap>({
+    game: room.gameId,
     phase: "waiting",
     remainingMs: 60000,
-    itPlayerId: null,
     players: [],
     }),
     [chat, setChat] = useState<{ from: string; text: string; at: number }[]>(
       [],
     ),
     [text, setText] = useState(""),
-    [spectator, setSpectator] = useState(room.role === "spectator"),
     [connErr, setConnErr] = useState(""),
-    sock = useRef<Socket | null>(null),
-    latestSnap = useRef<Snap | null>(null);
+    sock = useRef<Socket | null>(null);
 
-  useEffect(() => {
-    latestSnap.current = snap;
-  }, [snap]);
+  // Spectator status is server-authorized: read it from the authoritative
+  // snapshot roster so the UI converges with (re)joined membership roles.
+  const spectator =
+    snap.players.find((p) => p.id === user.id)?.spectator ?? false;
+
+  // sendInput stays referentially stable so arena components can hold it
+  // in effect dependency lists.
+  const sendInput = useCallback((input: Record<string, unknown>) => {
+    sock.current?.emit("client_event", input);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -419,7 +656,8 @@ function Game({
       if (disposed) return;
 
       // Identity is verified server-side from this one-time token; the
-      // client never asserts its own user id on the socket.
+      // client never asserts its own user id on the socket. The room's
+      // game definition is resolved server-side from the persisted room.
       s = io(GAME, {
         transports: ["websocket"],
         auth: {
@@ -456,35 +694,12 @@ function Game({
       });
     })();
 
-    const key = (e: KeyboardEvent) => {
-      const d: Record<string, string> = {
-        ArrowUp: "up",
-        w: "up",
-        ArrowDown: "down",
-        s: "down",
-        ArrowLeft: "left",
-        a: "left",
-        ArrowRight: "right",
-        d: "right",
-      };
-      const direction = d[e.key];
-      if (!direction) return;
-      const current = latestSnap.current ?? snap;
-      if (current.phase !== "running" || spectator) return;
-      sock.current?.emit("client_event", {
-        type: "input",
-        seq: Date.now(),
-        direction,
-      });
-    };
-    window.addEventListener("keydown", key);
     return () => {
-      window.removeEventListener("keydown", key);
       disposed = true;
       s?.close();
       sock.current = null;
     };
-  }, [room.code, spectator]);
+  }, [room.code]);
 
   useEffect(() => {
     void fetchApi(`/rooms/${room.code}/chat`)
@@ -499,13 +714,13 @@ function Game({
   }, [room.code]);
 
   const toggleSpectator = async (next: boolean): Promise<void> => {
-    // Spectator status is membership-based and server-authorized.
+    // The role change is membership-based and server-authorized; the
+    // authoritative roster (and this checkbox) update on the next snapshot.
     try {
       await fetchApi("/rooms/join", {
         method: "POST",
         body: JSON.stringify({ code: room.code, spectator: next }),
       });
-      setSpectator(next);
     } catch (error) {
       setConnErr(error instanceof Error ? error.message : "Could not switch role");
     }
@@ -517,6 +732,7 @@ function Game({
   const readyCount = participants.filter((p) => p.ready).length;
   const mineReady = participants.find((p) => p.id === user.id)?.ready ?? false;
   const canStart = participants.length >= 2 && readyCount === participants.length;
+  const Arena = gameViews[room.gameId] ?? TagArena;
   return (
     <section>
       <button onClick={back}>Back to lobby</button>
@@ -585,40 +801,16 @@ function Game({
       <p data-testid="timer">
         {snap.phase === "completed" ? "Match completed" : `Time: ${secs}s`}
       </p>
-      <div
-        aria-label="arena"
-        style={{
-          position: "relative",
-          width: 400,
-          height: 400,
-          border: "2px solid #94a3b8",
-          background: "#071122",
-        }}
-      >
-        {snap.players.map((p) => (
-          <div
-            title={p.name}
-            key={p.id}
-            style={{
-              position: "absolute",
-              width: 24,
-              height: 24,
-              left: p.x,
-              top: p.y,
-              background: p.color,
-              borderRadius: 6,
-              outline: snap.itPlayerId === p.id ? "3px solid gold" : "none",
-            }}
-          />
-        ))}
+      <div aria-label="arena">
+        <Arena snap={snap} spectator={spectator} sendInput={sendInput} />
       </div>
       <h2>Scoreboard</h2>
       <div data-testid="scoreboard">
         {[...snap.players]
-          .sort((a, b) => b.tags - a.tags)
+          .sort((a, b) => b.score - a.score)
           .map((p) => (
             <div key={p.id}>
-              {p.name}: {p.tags} tags {snap.itPlayerId === p.id ? "(IT)" : ""}
+              {p.name}: {p.score} pts
               {p.spectator
                 ? " (spectator)"
                 : snap.phase !== "running" && p.ready
@@ -632,7 +824,7 @@ function Game({
           <h2>Results</h2>
           {snap.results.map((p, i) => (
             <div key={p.id}>
-              #{i + 1} {p.name}: {p.tags}
+              #{i + 1} {p.name}: {p.score}
             </div>
           ))}
         </>

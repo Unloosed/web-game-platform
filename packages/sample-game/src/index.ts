@@ -1,14 +1,32 @@
-import type { Direction, Player } from "../../protocol/src/index.js";
+import type { Direction, GameDefinition, GamePhase, Player } from "../../protocol/src/index.js";
+import { tagInputSchema, type TagInput } from "../../protocol/src/index.js";
+
 export const ARENA = 400,
   SPEED = 150,
   MATCH_MS = 60_000,
   TAG_DISTANCE = 26,
-  MIN_PLAYERS = 2;
+  MIN_PLAYERS = 2,
+  MAX_PLAYERS = 8;
+export type TagPlayer = {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  color: string;
+  tags: number;
+  spectator: boolean;
+  ready: boolean;
+};
 export type State = {
-  players: Record<string, Player>;
+  players: Record<string, TagPlayer>;
   itPlayerId: string | null;
   remainingMs: number;
-  phase: "waiting" | "running" | "completed";
+  phase: GamePhase;
+};
+/** Game-specific render payload carried in the snapshot `view` field. */
+export type TagView = {
+  players: Array<{ id: string; x: number; y: number; color: string }>;
+  itPlayerId: string | null;
 };
 const colors = [
   "#38bdf8",
@@ -60,6 +78,16 @@ export function addPlayer(
         tags: 0,
       },
     },
+  };
+}
+/** Removes a player and releases the IT role if they held it. */
+export function removePlayer(s: State, id: string): State {
+  if (!s.players[id]) return s;
+  const { [id]: _removed, ...remainingPlayers } = s.players;
+  return {
+    ...s,
+    players: remainingPlayers,
+    itPlayerId: s.itPlayerId === id ? null : s.itPlayerId,
   };
 }
 /** Explicitly toggles a non-spectator player's readiness outside a live match. */
@@ -115,7 +143,6 @@ export function canStartMatch(s: State): boolean {
 export function move(s: State, id: string, d: Direction, dt: number): State {
   if (
     s.phase !== "running" ||
-    d === "none" ||
     !s.players[id] ||
     s.players[id].spectator
   )
@@ -170,3 +197,53 @@ export const results = (s: State) =>
   Object.values(s.players)
     .filter((p) => !p.spectator)
     .sort((a, b) => b.tags - a.tags || a.id.localeCompare(b.id));
+
+/** Generic roster rows for the shared snapshot/scoreboard envelope. */
+export const roster = (s: State): Player[] =>
+  Object.values(s.players).map((p) => ({
+    id: p.id,
+    name: p.name,
+    score: p.tags,
+    spectator: p.spectator,
+    ready: p.ready,
+  }));
+
+export const view = (s: State): TagView => ({
+  players: Object.values(s.players).map((p) => ({
+    id: p.id,
+    x: p.x,
+    y: p.y,
+    color: p.color,
+  })),
+  itPlayerId: s.itPlayerId,
+});
+
+/** The registry-facing definition binding the pure rules to the platform contract. */
+export const sampleTagGame: GameDefinition<State, TagInput> = {
+  metadata: {
+    id: "sample-tag",
+    name: "Tag Arena",
+    description: "Server-authoritative tag: chase, tag, and dodge for points.",
+    minPlayers: MIN_PLAYERS,
+    maxPlayers: MAX_PLAYERS,
+  },
+  inputSchema: tagInputSchema,
+  createState: (matchMs) => initialState(matchMs),
+  addPlayer: (s, p) => addPlayer(s, p.userId, p.displayName, p.spectator, p.ready),
+  removePlayer: (s, userId) => removePlayer(s, userId),
+  setReady: (s, userId, ready) => setReady(s, userId, ready),
+  setSpectator: (s, userId, spectator) => setSpectator(s, userId, spectator),
+  canStartMatch: (s) => canStartMatch(s),
+  applyInput: (s, userId, input, dtSeconds) => move(s, userId, input.direction, dtSeconds),
+  tick: (s, dtSeconds) => tick(s, dtSeconds),
+  roster: (s) => roster(s),
+  view: (s) => view(s),
+  getResults: (s) =>
+    results(s).map((p) => ({
+      id: p.id,
+      name: p.name,
+      score: p.tags,
+      spectator: false,
+      ready: p.ready,
+    })),
+};

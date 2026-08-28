@@ -11,7 +11,7 @@ This roadmap covers the reusable, self-hosted TypeScript Web Game Platform. It r
 | Milestone 3 | Completed | Server-authoritative tag-game mechanics, score/timer UI, spectator baseline, and test scaffolding |
 | Milestone 3.1 | Completed | Room lifecycle repair: lifecycle persistence boundaries, reconnect grace, server-authorized spectators, deterministic ready-gated startup, idempotent completion |
 | Milestone 4 | Completed | Achievements, moderation reports, kick, connection quotas, protocol-version gating, CSRF policy, extended observability, S3-compatible storage |
-| Milestone 5 | Planned | Formal game registry/plugin model, second game reference implementation, and extension guide validation |
+| Milestone 5 | Completed | Formal game registry/plugin model (`packages/game-registry`, `rooms.game_id`), second game reference implementation (`packages/color-rush`), per-game leaderboard, and rewritten extension guide |
 
 ---
 
@@ -338,45 +338,43 @@ Add durable game outcomes, moderation, observability, abuse protection, producti
 
 # Milestone 5: Formal game plugin architecture
 
-**Status: Planned**
+**Status: Completed**
 
 ## Objective
 
 Prove that a second game can be added without modifying platform internals, and publish the extension contract as stable developer documentation.
 
-## Deliverables
+## Delivered
 
 ### Game registry
 
-- `GameRegistry` mapping a stable `gameId` to metadata, server definition factory, client route/view, asset manifest, and optional platform feature configuration.
-- `rooms.game_id` persisted in PostgreSQL.
-- API room creation accepts a validated game ID.
-- Realtime server loads the correct definition by persisted room game ID rather than by a client query parameter.
+- `GameDefinition` contract in `packages/protocol`: a game is a plain object of pure functions (`createState`, `addPlayer`, `removePlayer`, `setReady`, `setSpectator`, `canStartMatch`, `applyInput`, `tick`, `roster`, `view`, `getResults`) plus a strict Zod input schema and lobby metadata. States must expose `phase` and `remainingMs`; snapshots became game-agnostic (generic `Player` roster rows `{id, name, score, spectator, ready}` plus a game-specific `view` payload), which is the `PROTOCOL_VERSION` 1 → 2 bump.
+- `packages/game-registry`: the single `gameId → definition` mapping with `getGame`, `listGames`, a boundary-validating `gameIdSchema`, and `DEFAULT_GAME_ID`.
+- `rooms.game_id` persisted in PostgreSQL (init schema + idempotent migration `005-milestone-5-game-registry.sql`).
+- API room creation accepts and validates a registered game id (`POST /rooms`), the lobby lists games via `GET /games`, and room reads/joins return `gameId`.
+- The realtime server resolves each room's definition from the **persisted** room game id, delivered by the trusted `POST /internal/socket/verify` response — never from a client-supplied query or handshake field.
+- `match_players.tags` renamed to the game-agnostic `match_players.score`; completion persists `{userId, score}` rows for every game; achievements evaluate game-agnostic `MatchStats.score`; `GET /leaderboard?game=<gameId>` adds the per-game leaderboard dimension.
 
 ### Second game reference
 
-- New independently implemented game package, such as `packages/color-rush`.
-- Different state, inputs, scoring, UI, and rules from sample tag.
-- Uses only stable platform contracts.
-- Unit and E2E tests demonstrate the platform does not require sample-tag-specific internals.
+- `packages/color-rush` (Color Rush, `color-rush`): independently implemented orb-collection race with dash boosts — different state (orbs, dash/cooldown timers), inputs (move + dash discriminated union), scoring (orbs collected, server-derived by proximity in `tick`), and UI (its own arena renderer) from sample tag.
+- Uses only the stable contracts: no edits to `RoomManager`, protocol envelopes, API lifecycle, moderation, or observability were needed to host it.
+- Unit tests (`packages/color-rush/test/rules.test.ts`), room-manager integration tests hosting both games side by side, and a Playwright E2E happy path (`tests/e2e/color-rush.spec.ts`) demonstrate the platform carries no sample-tag-specific internals. The web app dispatches arena rendering through its client-side `gameViews` registry while the room chrome (ready-up, start, timer, scoreboard, results, chat) stays generic.
 
 ### Extension documentation
 
-- Game plugin guide.
-- Game author checklist.
-- Protocol versioning guidance.
-- Testing and deployment guidance for a third-party game package.
+- `docs/web-game-platform-game-plugin-guide.md` rewritten against the real architecture: layer model, `GameDefinition` reference, envelope-vs-payload input rules, registration steps (one registry entry + one client view entry), lifecycle contract, persistence/achievements/leaderboard integration, testing requirements, protocol-versioning policy, game author checklist, common mistakes, and deployment notes.
 
-## Definition of done
+## Definition of done — met
 
-- A new game package can be created, registered, selected in the lobby, hosted in a room, and tested without editing generic room/tick/protocol internals.
-- The second game uses the same persistence, moderation, observability, lifecycle, and deployment facilities.
+- A new game package can be created, registered (one `packages/game-registry` entry), selected in the lobby (`GET /games` + game selector), hosted in a room (definition resolved from `rooms.game_id`), and tested without editing generic room/tick/protocol internals.
+- The second game uses the same persistence (idempotent match records, per-game leaderboard), moderation, observability, lifecycle (ready gates, reconnect grace, spectator authorization, archived abandonment), and deployment facilities as the reference game.
 
 ---
 
 # Suggested execution order
 
-1. Milestones 3, 3.1, and 4 are complete; do not add new features that bypass the repaired lifecycle or the hardening gates.
-2. Implement the game registry and second game in Milestone 5 after the lifecycle, hardening, and result hooks — all now stable.
-3. Extend the leaderboard with per-game dimensions as part of the Milestone 5 registry work (`rooms.game_id`).
+1. Milestones 3, 3.1, 4, and 5 are complete; do not add new features that bypass the repaired lifecycle, the hardening gates, or the game registry seam.
+2. New games enter through `packages/game-registry` and the web `gameViews` registry only; the guide's checklist is the acceptance bar.
+3. Per-game leaderboard dimensions shipped with Milestone 5 (`rooms.game_id`); season/rule-scoped variants can build on the same key if demand appears.
 4. If horizontal scaling arrives, introduce the OpenTelemetry trace SDK alongside a collector so room-routing failures can be traced.

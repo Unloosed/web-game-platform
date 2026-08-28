@@ -369,6 +369,8 @@ type VerifiedIdentity = {
   spectator: boolean;
   host: boolean;
   muted: boolean;
+  /** Persisted room game id; the room's definition resolves from it. */
+  gameId: string;
 };
 
 async function verifyHandshake(
@@ -449,13 +451,17 @@ io.on("connection", (socket) => {
     trackSocket(userId, socket);
     trackIp(socket.handshake.address, socket);
 
-    roomManager.connect(roomCode.data, {
-      userId,
-      displayName,
-      spectator,
-      host,
-      socketId: socket.id,
-    });
+    roomManager.connect(
+      roomCode.data,
+      {
+        userId,
+        displayName,
+        spectator,
+        host,
+        socketId: socket.id,
+      },
+      identity.gameId,
+    );
 
     socket.on("request_snapshot", () => {
       const snapshot = roomManager.getSnapshot(roomCode.data);
@@ -481,14 +487,18 @@ io.on("connection", (socket) => {
       }
 
       if (event.data.type === "input") {
-        if (event.data.direction === "none") return;
         const now = Date.now();
         if (now - lastInputAt < inputMinIntervalMs) {
           metrics.increment("game_inputs_rejected_total");
           return;
         }
         lastInputAt = now;
-        roomManager.move(roomCode.data, userId, event.data.direction);
+        // The generic envelope passed; the room's game validates the
+        // payload. A null result means the input never mutated state.
+        const snapshot = roomManager.input(roomCode.data, userId, event.data);
+        if (!snapshot) {
+          metrics.increment("game_inputs_rejected_total");
+        }
         return;
       }
 

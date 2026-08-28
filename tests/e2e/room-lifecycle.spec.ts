@@ -171,14 +171,18 @@ test.describe("Milestone 3.1 room lifecycle", () => {
       await joinByCode(watcher, code);
 
       // The toggle updates durable membership; the API then propagates the
-      // role change to the live socket session. Click (not check): the
-      // controlled checkbox re-renders with each 20 Hz snapshot, so assert
-      // the authoritative server state below instead of the input state.
-      await watcher.getByRole("checkbox").click();
+      // role change to the live socket session. The controlled checkbox
+      // re-renders with each 20 Hz snapshot, so a click can race the
+      // re-render right after joining; retry the click until the
+      // authoritative server roster reflects the spectator role.
+      await expect(async () => {
+        await watcher.getByRole("checkbox").click();
+        await expect(watcher.getByTestId("scoreboard")).toContainText(
+          "(spectator)",
+          { timeout: 2_000 },
+        );
+      }).toPass({ timeout: 15_000 });
 
-      await expect(watcher.getByTestId("scoreboard")).toContainText(
-        "(spectator)",
-      );
       await expect(watcher.getByLabel("arena")).toBeVisible();
       // Spectators receive no gameplay controls and never block readiness.
       await expect(watcher.getByTestId("ready-toggle")).toHaveCount(0);

@@ -181,11 +181,12 @@ function escapeRegex(value: string): string {
 /**
  * Achievement contract. Games/apps derive a MatchStats view from a completed
  * match; evaluation is pure so it can be unit-tested and reused by any
- * future game package without touching persistence.
+ * game package without touching persistence. `score` is game-defined
+ * (tags in sample-tag, orbs collected in color-rush).
  */
 export type MatchStats = {
   winnerUserId: string | null;
-  players: Array<{ userId: string; tags: number }>;
+  players: Array<{ userId: string; score: number }>;
 };
 
 export type AchievementDefinition = {
@@ -207,9 +208,9 @@ export const ACHIEVEMENTS: AchievementDefinition[] = [
   },
   {
     code: "sharpshooter",
-    description: "Tagged 5 or more players in a single match",
+    description: "Scored 5 or more in a single match",
     evaluate: (stats, userId) =>
-      (stats.players.find((p) => p.userId === userId)?.tags ?? 0) >= 5,
+      (stats.players.find((p) => p.userId === userId)?.score ?? 0) >= 5,
   },
 ];
 

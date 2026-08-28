@@ -100,8 +100,8 @@ describe("achievements", () => {
   const stats = {
     winnerUserId: WINNER,
     players: [
-      { userId: WINNER, tags: 6 },
-      { userId: LOSER, tags: 1 },
+      { userId: WINNER, score: 6 },
+      { userId: LOSER, score: 1 },
     ],
   };
 
@@ -111,7 +111,7 @@ describe("achievements", () => {
     );
   });
 
-  it("awards only participation to a low-tag loser", () => {
+  it("awards only participation to a low-score loser", () => {
     expect(evaluateAchievements(stats, LOSER)).toEqual(["first_match"]);
   });
 });
