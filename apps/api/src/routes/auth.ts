@@ -65,6 +65,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return { user: { id: u.id, displayName: u.display_name, role: u.role } };
   });
 
+  app.post("/auth/logout", async (req, reply) => {
+    const sessionId = req.cookies.session_id;
+    if (sessionId) {
+      await db.query("delete from sessions where id = $1", [sessionId]);
+    }
+    reply.clearCookie("session_id", { path: "/" });
+    return { ok: true };
+  });
+
   app.get("/auth/me", async (req) => {
     const u = await user(req);
     return {
