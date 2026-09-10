@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
 
 jobs:
@@ -29,3 +29,95 @@ jobs:
       - run: pnpm test
 
       - run: pnpm build
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: webgame
+          POSTGRES_PASSWORD: webgame
+          POSTGRES_DB: webgame
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://webgame:webgame@localhost:5432/webgame
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Apply schema and migrations
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          export PGPASSWORD=webgame
+          psql -h localhost -U webgame -d webgame -f infra/postgres-init.sql
+          for f in infra/migrations/*.sql; do
+            psql -h localhost -U webgame -d webgame -f "$f"
+          done
+
+      - name: Write .env
+        run: |
+          cat > .env <<EOF
+          GAME_SERVER_SECRET=ci-secret
+          LOGIN_RATE_LIMIT=100
+          GAME_MATCH_MS=8000
+          EOF
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Start dev stack
+        run: |
+          nohup pnpm dev > dev.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:4000/health/ready > /dev/null \
+              && curl -sf http://localhost:4100/health > /dev/null \
+              && curl -sf http://localhost:5173 > /dev/null; then
+              echo "stack healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "dev stack failed to become healthy"
+          tail -100 dev.log
+          exit 1
+
+      - name: Run E2E suites
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

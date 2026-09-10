@@ -27,18 +27,25 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     const result = await db.query(
       `
       SELECT
-        id,
-        code,
-        name,
-        game_id AS "gameId",
-        is_private AS "isPrivate",
-        status,
-        max_players AS "maxPlayers",
-        host_user_id AS "hostUserId"
-      FROM rooms
-      WHERE is_private = false
-        AND status IN ('waiting', 'running')
-      ORDER BY created_at DESC
+        r.id,
+        r.code,
+        r.name,
+        r.game_id AS "gameId",
+        r.is_private AS "isPrivate",
+        r.status,
+        r.max_players AS "maxPlayers",
+        r.host_user_id AS "hostUserId",
+        COALESCE(m.player_count, 0) AS "playerCount"
+      FROM rooms r
+      LEFT JOIN (
+        SELECT room_id, COUNT(*)::int AS player_count
+        FROM room_members
+        WHERE role <> 'spectator'
+        GROUP BY room_id
+      ) m ON m.room_id = r.id
+      WHERE r.is_private = false
+        AND r.status IN ('waiting', 'running')
+      ORDER BY r.created_at DESC
     `,
     );
 

@@ -18,6 +18,12 @@ export const env = z
     MODERATION_BANNED_WORDS: z.string().default("spam,scam"),
     SOCKET_TOKEN_TTL_MS: z.coerce.number().default(60_000),
     LOGIN_RATE_LIMIT: z.coerce.number().default(10),
+    STORAGE_DIR: z.string().default("data/assets"),
+    S3_ENDPOINT: z.string().default(""),
+    S3_REGION: z.string().default("us-east-1"),
+    S3_BUCKET: z.string().default(""),
+    S3_ACCESS_KEY_ID: z.string().default(""),
+    S3_SECRET_ACCESS_KEY: z.string().default(""),
   })
   .parse(process.env);
 

@@ -197,6 +197,14 @@ export function Lobby({
     }
   };
 
+  const joinByCode = async (rawCode: string): Promise<void> => {
+    const response = await fetchApi("/rooms/join", {
+      method: "POST",
+      body: JSON.stringify({ code: rawCode }),
+    });
+    enter(response.room as Room);
+  };
+
   const joinRoom = async (
     event: FormEvent<HTMLFormElement>,
   ): Promise<void> => {
@@ -204,15 +212,25 @@ export function Lobby({
 
     try {
       setErr("");
+      await joinByCode(code.trim().toUpperCase());
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "Could not join room");
+    }
+  };
 
-      const response = await fetchApi("/rooms/join", {
-        method: "POST",
-        body: JSON.stringify({
-          code: code.trim().toUpperCase(),
-        }),
-      });
-
-      enter(response.room as Room);
+  const quickJoin = async (): Promise<void> => {
+    try {
+      setErr("");
+      const open = rooms.find(
+        (r) =>
+          r.status === "waiting" &&
+          (r.maxPlayers ?? 8) > (r.playerCount ?? 0),
+      );
+      if (!open) {
+        setErr("No open public room right now — create one!");
+        return;
+      }
+      await joinByCode(open.code);
     } catch (error) {
       setErr(error instanceof Error ? error.message : "Could not join room");
     }
@@ -315,6 +333,14 @@ export function Lobby({
               <div className="section-title">
                 Public rooms
                 <small>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-small"
+                    data-testid="quick-join"
+                    onClick={() => void quickJoin()}
+                  >
+                    Quick join
+                  </button>
                   <button type="button" className="btn btn-ghost btn-small" onClick={() => void loadRooms()}>
                     Refresh
                   </button>
@@ -336,6 +362,16 @@ export function Lobby({
                     </span>
                     <span className="room-card-name">{room.name}</span>
                     <span className="room-card-code">{room.code}</span>
+                    {(room.maxPlayers ?? 0) > 0 && (
+                      <span
+                        className="occupancy"
+                        data-full={
+                          (room.playerCount ?? 0) >= (room.maxPlayers ?? 8)
+                        }
+                      >
+                        {room.playerCount ?? 0}/{room.maxPlayers}
+                      </span>
+                    )}
                     <button
                       type="button"
                       className="btn btn-small"

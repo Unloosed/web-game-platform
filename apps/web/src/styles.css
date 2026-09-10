@@ -504,6 +504,17 @@ select:hover {
   margin-left: auto;
 }
 
+.occupancy {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.occupancy[data-full="true"] {
+  color: var(--danger, #e5484d);
+}
+
 /* join by code */
 
 .code-input {
@@ -793,10 +804,62 @@ select:hover {
 }
 
 .arena-frame {
+  position: relative;
   padding: 10px;
   border-radius: 18px;
   background: linear-gradient(180deg, rgba(124, 108, 255, 0.25), rgba(34, 211, 238, 0.12));
   box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
+}
+
+.reconnect-overlay {
+  position: absolute;
+  inset: 10px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(7, 17, 34, 0.82);
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  z-index: 5;
+  pointer-events: none;
+}
+
+/* touch controls: hidden on mouse pointers, shown on coarse pointers */
+.dpad {
+  display: none;
+  margin-top: 10px;
+  justify-content: center;
+  gap: 8px;
+}
+
+.dpad-btn {
+  width: 58px;
+  height: 58px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 1.3rem;
+  font-weight: 700;
+  touch-action: none;
+  user-select: none;
+}
+
+.dpad-btn:active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.dpad-action {
+  margin-left: 12px;
+  color: var(--primary-strong);
+}
+
+@media (pointer: coarse) {
+  .dpad {
+    display: flex;
+  }
 }
 
 .arena-stage > .arena-frame > div {
@@ -834,9 +897,8 @@ select:hover {
 
 .player-dot {
   position: absolute;
-  border-radius: 6px;
-  box-shadow: 0 0 10px rgba(0, 0, 0, 0.5), 0 0 14px currentColor;
-  transition: left 60ms linear, top 60ms linear;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .player-dot.is-it {

@@ -118,6 +118,20 @@ test.describe("Milestone 3.1 room lifecycle", () => {
         "Time remaining",
       );
 
+      // Dropping the host's socket must surface the reconnect overlay,
+      // and reconnecting must restore the live connection. (Network
+      // emulation is unreliable for established localhost WebSockets, so
+      // the socket is driven through the explicit E2E seam.)
+      type Seam = { disconnect(): void; connect(): void };
+      await host.evaluate(() =>
+        (window as unknown as { __roomSocket?: Seam }).__roomSocket?.disconnect(),
+      );
+      await expect(host.getByTestId("reconnect-banner")).toBeVisible();
+      await host.evaluate(() =>
+        (window as unknown as { __roomSocket?: Seam }).__roomSocket?.connect(),
+      );
+      await expect(host.getByTestId("reconnect-banner")).toHaveCount(0);
+
       // Abrupt drop: simulation state must survive through reconnect grace.
       await guest.close();
       await host.waitForTimeout(1_000);

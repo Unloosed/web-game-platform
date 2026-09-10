@@ -2,11 +2,24 @@ import { Pool } from "pg";
 import { createClient } from "redis";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { rateLimit, MetricsRegistry, parseBannedWords } from "../../../packages/platform/src/index.js";
+import { LocalDiskStorage, S3Storage, type StorageAdapter } from "../../../packages/storage/src/index.js";
 import { env } from "./env.js";
 
 export { env, isProduction } from "./env.js";
 
 export const db = new Pool({ connectionString: env.DATABASE_URL });
+
+/** Game assets (SFX, images). S3-compatible storage when configured,
+ * local disk otherwise — see docs/deployment.md. */
+export const storage: StorageAdapter = env.S3_BUCKET
+  ? new S3Storage({
+      endpoint: env.S3_ENDPOINT,
+      region: env.S3_REGION,
+      bucket: env.S3_BUCKET,
+      accessKeyId: env.S3_ACCESS_KEY_ID,
+      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+    })
+  : new LocalDiskStorage(env.STORAGE_DIR);
 
 export const redis = createClient({ url: env.REDIS_URL });
 redis.on("error", (error) => {

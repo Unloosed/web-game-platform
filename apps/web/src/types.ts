@@ -13,6 +13,8 @@ export type Room = {
   status: string;
   hostUserId: string;
   role?: string;
+  maxPlayers?: number;
+  playerCount?: number;
 };
 
 export type GameMeta = {

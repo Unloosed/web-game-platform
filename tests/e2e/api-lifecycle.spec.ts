@@ -376,4 +376,23 @@ test.describe("Milestone 3/3.1 API behavior", () => {
       await outsiderContext.close();
     }
   });
+
+  test("lists public rooms with occupancy", async ({ request }) => {
+    const user = await login(request, `lobby-${Date.now()}`);
+    const created = await request.post(`${API_URL}/rooms`, {
+      data: { name: "Open Floor", isPrivate: false },
+    });
+    expect(created.status()).toBe(201);
+    const room = ((await created.json()) as { room: Room }).room;
+
+    const listed = await request.get(`${API_URL}/rooms`);
+    expect(listed.ok()).toBeTruthy();
+    const rooms = ((await listed.json()) as { rooms: Array<Room & { playerCount?: number; maxPlayers?: number }> }).rooms;
+    const row = rooms.find((r) => r.code === room.code);
+    expect(row).toBeTruthy();
+    // The host is a member, so the room is occupied by exactly one player.
+    expect(row!.playerCount).toBe(1);
+    expect(row!.maxPlayers).toBeGreaterThan(0);
+    expect(row!.hostUserId).toBe(user.id);
+  });
 });

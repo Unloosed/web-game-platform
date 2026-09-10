@@ -10,6 +10,7 @@ import { matchRoutes } from "./routes/matches.js";
 import { adminRoutes } from "./routes/admin.js";
 import { internalRoutes } from "./routes/internal.js";
 import { reportRoutes } from "./routes/reports.js";
+import { assetRoutes } from "./routes/assets.js";
 
 const app: FastifyInstance = Fastify({
   logger: true,
@@ -118,6 +119,7 @@ await app.register(matchRoutes);
 await app.register(adminRoutes);
 await app.register(internalRoutes);
 await app.register(reportRoutes);
+await app.register(assetRoutes);
 
 app.setErrorHandler((error: Error, req, reply) => {
   if (reply.statusCode < 400) {

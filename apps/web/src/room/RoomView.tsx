@@ -3,6 +3,7 @@ import { io, type Socket } from "socket.io-client";
 import { fetchApi, GAME, PROTOCOL_VERSION } from "../api";
 import { getGameView } from "../games/registry";
 import { useGames } from "../Lobby";
+import { useSfx } from "./sfx";
 import type { Room, Snap, User } from "../types";
 import { mmss, Topbar } from "../ui";
 
@@ -79,6 +80,8 @@ export function RoomView({
     [connErr, setConnErr] = useState(""),
     [copied, setCopied] = useState(false),
     [connected, setConnected] = useState(false),
+    [wasConnected, setWasConnected] = useState(false),
+    [sfxOn, setSfxOn] = useState(true),
     sock = useRef<Socket | null>(null),
     chatLogRef = useRef<HTMLDivElement | null>(null),
     matchTotalMs = useRef(0);
@@ -93,6 +96,8 @@ export function RoomView({
   const sendInput = useCallback((input: Record<string, unknown>) => {
     sock.current?.emit("client_event", input);
   }, []);
+
+  useSfx(snap, sfxOn);
 
   useEffect(() => {
     let disposed = false;
@@ -127,6 +132,8 @@ export function RoomView({
         },
       });
       sock.current = s;
+      // E2E seam: lets tests drop/re-establish the connection deterministically.
+      (window as unknown as { __roomSocket?: Socket }).__roomSocket = s;
 
       s.on("server_event", (x: Snap) => {
         setSnap(x);
@@ -142,6 +149,7 @@ export function RoomView({
 
       s.on("connect", () => {
         setConnected(true);
+        setWasConnected(true);
         setConnErr("");
         s!.emit("request_snapshot");
       });
@@ -265,6 +273,16 @@ export function RoomView({
             />
             Spectate only
           </label>
+          <button
+            type="button"
+            className="btn btn-small"
+            data-testid="sfx-toggle"
+            aria-pressed={sfxOn}
+            title="Game sound effects"
+            onClick={() => setSfxOn((v) => !v)}
+          >
+            SFX {sfxOn ? "on" : "off"}
+          </button>
         </div>
         {connErr && (
           <p className="alert" role="alert">
@@ -352,6 +370,11 @@ export function RoomView({
           <div className="arena-stage" aria-label="arena" data-game={room.gameId}>
             <div className="arena-frame">
               <Arena snap={snap} spectator={spectator} sendInput={sendInput} />
+              {!connected && wasConnected && !connErr && (
+                <div className="reconnect-overlay" data-testid="reconnect-banner" role="status">
+                  Connection lost — reconnecting…
+                </div>
+              )}
             </div>
             {!spectator && (
               <div className="controls-hint">

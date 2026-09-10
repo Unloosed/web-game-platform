@@ -48,6 +48,8 @@ Create a runnable foundation that proves the browser, HTTP API, realtime server,
 - `@webgame/game-server-sdk`: generic room wrapper and fixed-rate tick loop.
 - `@webgame/sample-game`: basic top-down movement game used to validate the platform.
 
+> Consolidation note: the packages above were later merged. Shared contracts now live in `packages/protocol` and `packages/platform` (rate limiting, metrics, achievements), the room/tick engine in `apps/game-server/src`, and the client socket/keyboard helpers in `apps/web/src/games/arena.tsx`. The surviving source trees under `packages/` (`protocol`, `platform`, `sample-game`, `color-rush`, `game-registry`, `storage`) are consumed via relative imports and have no per-package `package.json`.
+
 ### Infrastructure
 
 - Docker Compose services for PostgreSQL and Redis.

@@ -15,7 +15,8 @@
     "build": "pnpm --dir apps/web build",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "db:reset": "docker compose down -v && docker compose up -d postgres redis"
+    "db:reset": "docker compose down -v && docker compose up -d postgres redis",
+    "assets:seed": "node --import tsx infra/generate-assets.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",

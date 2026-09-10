@@ -20,7 +20,7 @@ pnpm db:reset   # fresh DB includes the Milestone 5 schema
 pnpm dev
 ```
 
-Existing databases need one migration applied manually: `infra/migrations/005-milestone-5-game-registry.sql` (adds `rooms.game_id`, renames `match_players.tags` to `score`).
+Existing databases need one migration applied manually: `infra/migrations/005-milestone-5-game-registry.sql` (adds `rooms.game_id`, renames `match_players.tags` to `score`). Run `pnpm assets:seed` once to generate the built-in game sound effects.
 
 Open `http://localhost:5173`. Create a room in one browser profile — pick the game in the create-room selector. Use another browser profile/incognito window to sign in as a second user and join using the displayed six-character code. Both players press **Ready up**; the host then presses **Start match** and both use arrow keys/WASD (Color Rush: Space dashes). Spectators can enable **Spectate only** at any time.
 
@@ -35,6 +35,8 @@ pnpm lint        # eslint
 # E2E requires Docker infra (pnpm db:reset) and pnpm dev running:
 pnpm test:e2e
 ```
+
+The E2E suites sign in ~25 users in quick succession and finish matches fast, so set `GAME_MATCH_MS=8000` and `LOGIN_RATE_LIMIT=100` in `.env` and restart `pnpm dev` first — the defaults (60 s matches, 10 logins per IP per 10 minutes) will fail the run.
 
 E2E suites: `tests/e2e/multiplayer.spec.ts` (ready-up/start/movement), `tests/e2e/color-rush.spec.ts` (second game end to end), `tests/e2e/api-lifecycle.spec.ts` (authorization, chat persistence, lifecycle persistence, achievements), and `tests/e2e/room-lifecycle.spec.ts` (match completion/results/rematch, reconnect within grace via a reused browser session, spectator view).
 
