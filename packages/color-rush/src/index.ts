@@ -46,19 +46,23 @@ export type RushView = {
 };
 
 /** Strict per-game input: the platform only validates the generic envelope;
- * this schema owns the rest. */
+ * this schema owns the rest. Unknown fields fail (see plugin guide §4). */
 export const colorRushInputSchema = z.discriminatedUnion("op", [
-  z.object({
-    type: z.literal("input"),
-    seq: z.number().int().nonnegative(),
-    op: z.literal("move"),
-    direction: directionSchema,
-  }),
-  z.object({
-    type: z.literal("input"),
-    seq: z.number().int().nonnegative(),
-    op: z.literal("dash"),
-  }),
+  z
+    .object({
+      type: z.literal("input"),
+      seq: z.number().int().nonnegative(),
+      op: z.literal("move"),
+      direction: directionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("input"),
+      seq: z.number().int().nonnegative(),
+      op: z.literal("dash"),
+    })
+    .strict(),
 ]);
 export type RushInput = z.infer<typeof colorRushInputSchema>;
 

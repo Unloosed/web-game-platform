@@ -7,7 +7,7 @@ Since Milestone 5 the platform hosts **multiple games** through a formal plugin 
 - `sample-tag` (Tag Arena) — the reference server-authoritative tag game.
 - `color-rush` (Color Rush) — orb-collection race with dash boosts, added with **zero changes** to platform internals.
 
-Games register in `packages/game-registry` (server) and the `gameViews` map in `apps/web/src/main.tsx` (client); rooms persist their game in `rooms.game_id`; the realtime server resolves each room's definition from that persisted id; the lobby's game selector, `GET /games`, and the per-game leaderboard (`GET /leaderboard?game=<gameId>`) are registry-driven. **To add a new game, follow `docs/web-game-platform-game-plugin-guide.md`** — it documents the `GameDefinition` contract, standards, testing requirements, and the author checklist.
+Games register in `packages/game-registry` (server) and the `gameViews` map in `apps/web/src/games/registry.tsx` (client); rooms persist their game in `rooms.game_id`; the realtime server resolves each room's definition from that persisted id; the lobby's game selector, `GET /games`, and the per-game leaderboard (`GET /leaderboard?game=<gameId>`) are registry-driven, and every registered game is automatically run through the platform-contract conformance suite in `packages/game-registry/test/conformance.test.ts`. **To add a new game, follow `docs/web-game-platform-game-plugin-guide.md`** — it documents the `GameDefinition` contract, standards, testing requirements, and the author checklist.
 
 ## Run locally
 

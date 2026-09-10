@@ -77,7 +77,8 @@ Rules of thumb:
   React, sockets, or the database.
 - Tests belong close to the game's rules (`packages/<game>/test`).
 - The web app cannot import from `packages/` — mirror the view types locally
-  in `apps/web/src/main.tsx` (see section 9).
+  in `apps/web/src/types.ts` (or inside your arena component) and register
+  the arena in `apps/web/src/games/registry.tsx` (see section 6).
 
 ---
 
@@ -222,14 +223,23 @@ API read from PostgreSQL.
 # 6. Web client view
 
 The web app mirrors types locally (it deliberately does not import from
-`packages/`) and keeps a client-side registry in `apps/web/src/main.tsx`:
+`packages/`) and keeps a client-side game registry in
+`apps/web/src/games/registry.tsx`:
 
 ```tsx
-const gameViews: Record<string, React.ComponentType<ArenaProps>> = {
-  "sample-tag": TagArena,
-  "color-rush": ColorRushArena,
+const gameViews: Record<string, GameViewEntry> = {
+  "sample-tag": { component: TagArena, controls: [...] },
+  "color-rush": { component: ColorRushArena, controls: [...] },
 };
+
+export function getGameView(gameId: string): GameViewEntry { ... }
 ```
+
+Each game's arena component lives in its own file
+(`apps/web/src/games/<game>-arena.tsx`), next to the shared arena helpers in
+`apps/web/src/games/arena.tsx`. Adding a game to the UI means one new
+component file plus one registry entry; the generic room chrome never
+changes.
 
 `ArenaProps` gives your component everything the game-specific UI needs:
 
@@ -241,6 +251,10 @@ type ArenaProps = {
 };
 ```
 
+Shared helpers in `games/arena.tsx`: `useLatestSnap` (stable ref for event
+handlers) and `useMovementKeys` (WASD/arrow listener that maps keys to
+direction strings).
+
 Your arena component:
 
 1. Casts `snap.view` to your local mirrored view type.
@@ -249,14 +263,19 @@ Your arena component:
 3. Renders only; it never decides score, collisions, or completion.
 4. Keeps a stable `data-testid` (e.g. `color-rush-arena`) for E2E.
 
+If a room hosts a game id with no registered view, the room renders an
+`unknown-arena` placeholder naming the missing game — registration gaps are
+visible immediately instead of silently falling back to another game's
+arena.
+
 The generic room chrome — invite code, spectator toggle, ready-up, start/
 restart (host-only, readiness-gated), timer, scoreboard (sorted by `score`),
-results, chat — is rendered by the platform for every game. Do not duplicate
-it inside an arena view.
+results, chat — is rendered by the platform (`apps/web/src/room/RoomView.tsx`)
+for every game. Do not duplicate it inside an arena view.
 
 The lobby's game selector and the public-room list are registry-driven via
 `GET /games`; they render new games automatically once the server registry
-and the `gameViews` entry exist.
+and the `games/registry.tsx` entry exist.
 
 ---
 
@@ -307,8 +326,12 @@ Answer these in your game README before registering:
 
 # 9. Testing requirements
 
-Three layers, matching the reference games:
-
+0. **Platform conformance is automatic.**
+   `packages/game-registry/test/conformance.test.ts` drives every registered
+   game through the §3 hard requirements (state seeding, roster/view/getResults
+   shapes, spectator and ready rules, phase gating, strict input schemas,
+   timer completion). Registering your game runs it — keep it green, and note
+   it does not replace the game-specific tests below.
 1. **Rules unit tests** (`packages/<game>/test/rules.test.ts`, vitest). Cover
    at minimum: phase gating (no input/tick effect outside `running`), bounds,
    your scoring rule awards exactly once, spectator isolation, ready gating
@@ -346,7 +369,7 @@ handshake; mismatches are rejected and counted.
   the matching client component, which deploys with the game package. Keep
   `view` additive (new optional fields) where you can.
 - Adding a new game never bumps the version.
-- When you bump: update the mirrored constant in `apps/web/src/main.tsx`,
+- When you bump: update the mirrored constant in `apps/web/src/api.ts`,
   adjust protocol tests, and note the breaking change here.
 
 ---
@@ -369,13 +392,15 @@ Before registering a game:
 - [ ] Ready gating mirrors the platform rule; readiness frozen mid-match.
 - [ ] Completion is a single `phase = "completed"` transition; `GAME_MATCH_MS`
       honored.
-- [ ] Unit + room-manager + E2E tests added (see section 9).
-- [ ] Registered in `packages/game-registry` and `gameViews` in the web app.
+- [ ] Unit + room-manager + E2E tests added (see section 9); the registry
+      conformance suite stays green.
+- [ ] Registered in `packages/game-registry` and `apps/web/src/games/registry.tsx`.
 - [ ] Arena view has a `data-testid`, respects `spectator`, and leaves
       ready/start/timer/scoreboard/chat to the generic chrome.
 
 If every box ticks, the total platform diff for a third game is: the game
-package, one registry entry, one `gameViews` entry, and tests. Nothing in
+package, one server registry entry, one client registry entry, and tests.
+Nothing in
 `apps/api`, `apps/game-server/src`, or `packages/protocol` changes.
 
 ---

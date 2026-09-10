@@ -80,11 +80,15 @@ export type GameDefinition<
 export type AnyGameDefinition = GameDefinition<AnyGameState, unknown>;
 
 export const directionSchema = z.enum(["up", "down", "left", "right"]);
-export const tagInputSchema = z.object({
-  type: z.literal("input"),
-  seq: z.number().int().nonnegative(),
-  direction: directionSchema,
-});
+/** Strict: unknown fields must fail (see plugin guide §4), so a payload
+ * carrying extra data is rejected rather than silently stripped. */
+export const tagInputSchema = z
+  .object({
+    type: z.literal("input"),
+    seq: z.number().int().nonnegative(),
+    direction: directionSchema,
+  })
+  .strict();
 export type TagInput = z.infer<typeof tagInputSchema>;
 
 /**
