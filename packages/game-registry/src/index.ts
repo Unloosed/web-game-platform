@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AnyGameDefinition, GameMetadata } from "../../protocol/src/index.js";
 import { sampleTagGame } from "../../sample-game/src/index.js";
 import { colorRushGame } from "../../color-rush/src/index.js";
+import { chessGame } from "../../chess/src/index.js";
 
 /**
  * The server-side game registry: the single place a game package is
@@ -15,6 +16,7 @@ export const DEFAULT_GAME_ID = sampleTagGame.metadata.id;
 export const gameRegistry: Record<string, AnyGameDefinition> = {
   [sampleTagGame.metadata.id]: sampleTagGame,
   [colorRushGame.metadata.id]: colorRushGame,
+  [chessGame.metadata.id]: chessGame,
 };
 
 /** Validates untrusted game ids at the API boundary. */

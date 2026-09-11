@@ -1,4 +1,5 @@
 import type { ArenaProps, GameViewEntry } from "./arena";
+import { ChessArena } from "./chess-arena";
 import { ColorRushArena } from "./color-rush-arena";
 import { TagArena } from "./tag-arena";
 
@@ -34,15 +35,25 @@ const gameViews: Record<string, GameViewEntry> = {
   "sample-tag": {
     component: TagArena,
     controls: [
-      { keys: "WASD / ← ↑ → ↓", action: "move" },
-      { keys: "Tag", action: "steal the crown" },
+      { keys: "WASD / ← ↑ → ↓", action: "move (releases stop)" },
+      { keys: "Space", action: "dash" },
+      { keys: "Touch", action: "tag the runner for 5 pts; dodge for survival pts" },
     ],
   },
   "color-rush": {
     component: ColorRushArena,
     controls: [
-      { keys: "WASD / ← ↑ → ↓", action: "move" },
+      { keys: "WASD / ← ↑ → ↓", action: "move (releases stop)" },
       { keys: "Space", action: "dash" },
+      { keys: "★", action: "star orbs are worth 3" },
+    ],
+  },
+  chess: {
+    component: ChessArena,
+    controls: [
+      { keys: "Mouse", action: "click your piece, then a highlighted square" },
+      { keys: "Clocks", action: "each side gets the match timer; flag fall loses" },
+      { keys: "Promote", action: "pawns auto-promote to queen" },
     ],
   },
 };

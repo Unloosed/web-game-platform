@@ -147,23 +147,33 @@ The platform validates only the generic envelope (`type: "input"`, integer
 input belongs to your game and is validated by your own strict schema, which
 the `RoomManager` runs via `inputSchema.safeParse` before `applyInput`.
 
-Tag Arena — direction movement only:
+Both arena games use intent-based movement — a discriminated union owned by
+the game package (never `packages/protocol`, which only owns the envelope and
+the shared `directionSchema`):
 
 ```ts
-tagInputSchema = z.object({
-  type: z.literal("input"), seq: z.number().int().nonnegative(),
-  direction: z.enum(["up", "down", "left", "right"]),
-});
+// packages/sample-game (Color Rush is the same plus its dash op)
+tagInputSchema = z.discriminatedUnion("op", [
+  z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
+             op: z.literal("move"), direction: directionSchema }).strict(),
+  z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
+             op: z.literal("stop") }).strict(),
+  z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
+             op: z.literal("dash") }).strict(),
+]);
 ```
 
-Color Rush — a discriminated union with a second action:
+Turn-based games own their payload the same way; Chess validates algebraic
+squares against the full legal-move list and completes inside `applyInput`:
 
 ```ts
-colorRushInputSchema = z.discriminatedUnion("op", [
+// packages/chess
+chessInputSchema = z.discriminatedUnion("op", [
   z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
-             op: z.literal("move"), direction: directionSchema }),
+             op: z.literal("move"), from: squareSchema, to: squareSchema,
+             promotion: promotionSchema.optional() }).strict(),
   z.object({ type: z.literal("input"), seq: z.number().int().nonnegative(),
-             op: z.literal("dash") }),
+             op: z.literal("resign") }).strict(),
 ]);
 ```
 
@@ -174,9 +184,15 @@ Standards:
 - **Rate of inputs is capped by the platform** (one accepted input per 50 ms
   per socket, matching the 20 Hz tick) — do not design mechanics that need
   more.
-- Movement advances on accepted input (`dt = 1/20 s`), and physics progression
-  (cooldowns, boosts) decrements in `tick`. Color Rush's dash works exactly
-  this way; copy that pattern for timed abilities.
+- **Movement is tick-driven from held intent**: `move` stores a direction,
+  `stop` clears it, and `tick` advances positions every 20 Hz tick. Physics
+  progression (cooldowns, boosts, stuns) also decrements in `tick`. Both
+  arena games work this way; copy the pattern for real-time mechanics.
+- **Input-driven completion is supported**: if an input (a chess mate or
+  resignation) sets `phase = "completed"`, the RoomManager persists the match
+  record from the input path exactly as it does from the tick path. The
+  recorded winner is the top score only when it is strictly ahead of the
+  runner-up — tied top scores persist as a draw with no winner.
 
 ---
 
@@ -187,10 +203,12 @@ Standards:
 ```ts
 import { sampleTagGame } from "../../sample-game/src/index.js";
 import { colorRushGame } from "../../color-rush/src/index.js";
+import { chessGame } from "../../chess/src/index.js";
 
 export const gameRegistry: Record<string, AnyGameDefinition> = {
   [sampleTagGame.metadata.id]: sampleTagGame,
   [colorRushGame.metadata.id]: colorRushGame,
+  [chessGame.metadata.id]: chessGame,
 };
 
 export const DEFAULT_GAME_ID = sampleTagGame.metadata.id;
@@ -230,6 +248,7 @@ The web app mirrors types locally (it deliberately does not import from
 const gameViews: Record<string, GameViewEntry> = {
   "sample-tag": { component: TagArena, controls: [...] },
   "color-rush": { component: ColorRushArena, controls: [...] },
+  chess: { component: ChessArena, controls: [...] },
 };
 
 export function getGameView(gameId: string): GameViewEntry { ... }
@@ -247,13 +266,15 @@ changes.
 type ArenaProps = {
   snap: Snap;          // latest snapshot (players: generic roster, view: unknown)
   spectator: boolean;  // spectators get no input listeners
+  userId: string;      // the local viewer's id (asymmetric games need it)
   sendInput: (input: Record<string, unknown>) => void;
 };
 ```
 
 Shared helpers in `games/arena.tsx`: `useLatestSnap` (stable ref for event
-handlers) and `useMovementKeys` (WASD/arrow listener that maps keys to
-direction strings).
+handlers), `useMovementKeys` (tracks held WASD/arrow keys, emitting one
+`move` when the direction changes and one `stop` on release/blur), and
+`useFitScale` (scales a fixed-size arena to its container).
 
 Your arena component:
 
@@ -289,10 +310,11 @@ create room (status=waiting, rooms.game_id persisted)
   -> players join (membership + handshake verified; reconnect restores ready)
   -> ready toggles (spectators rejected; mirrored to room_members.ready)
   -> host start (waiting + canStartMatch) -> phase=running, status=running
-  -> 20 Hz tick loop; inputs applied between ticks
-  -> your tick sets phase=completed exactly once
+  -> 20 Hz tick loop; intent inputs applied between ticks
+  -> your tick (or an input, e.g. checkmate) sets phase=completed exactly once
   -> platform persists {winnerUserId, results: [{userId, score}]}
-     idempotently (one match row per room) and broadcasts results
+     idempotently (one match row per room) and broadcasts results;
+     tied top scores persist with winnerUserId = null
   -> host rematch (completed + canStartMatch) -> fresh state, same rules
   -> empty waiting room deleted; abandoned running room archived;
      completed room kept for results

@@ -80,16 +80,7 @@ export type GameDefinition<
 export type AnyGameDefinition = GameDefinition<AnyGameState, unknown>;
 
 export const directionSchema = z.enum(["up", "down", "left", "right"]);
-/** Strict: unknown fields must fail (see plugin guide §4), so a payload
- * carrying extra data is rejected rather than silently stripped. */
-export const tagInputSchema = z
-  .object({
-    type: z.literal("input"),
-    seq: z.number().int().nonnegative(),
-    direction: directionSchema,
-  })
-  .strict();
-export type TagInput = z.infer<typeof tagInputSchema>;
+export type Direction = z.infer<typeof directionSchema>;
 
 /**
  * Generic client-event envelope. `input` payloads are only shape-gated
@@ -116,7 +107,6 @@ export const clientEventSchema = z.union([
   readySchema,
 ]);
 export type ClientEvent = z.infer<typeof clientEventSchema>;
-export type Direction = z.infer<typeof directionSchema>;
 
 export type Snapshot = {
   type: "snapshot";

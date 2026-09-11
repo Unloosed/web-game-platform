@@ -8,15 +8,20 @@ import {
 import type { Snap } from "../types";
 import { lerpPositions, type Pt } from "./smooth";
 
+/** Matches the game server's per-socket input throttle (50 ms). */
+const INPUT_PACE_MS = 50;
+
 /**
  * Everything a game's arena view receives from the generic room chrome.
  * Arena components render `snap.view` (game-specific payload) and emit
  * schema-valid input intents through `sendInput`; scoring, collisions,
- * and completion stay server-side.
+ * and completion stay server-side. `userId` is the local viewer's id,
+ * needed by asymmetric games (e.g. chess) to know which side they control.
  */
 export type ArenaProps = {
   snap: Snap;
   spectator: boolean;
+  userId: string;
   sendInput: (input: Record<string, unknown>) => void;
 };
 
@@ -76,16 +81,23 @@ export function useSmoothedPositions(
   return out;
 }
 
-/** Shared WASD/arrow-key movement listener; arenas map directions to
- * their own input payloads via `onDirection`. */
+/**
+ * Shared WASD/arrow-key movement listener; arenas map intents to their own
+ * input payloads via `onDirection`. Keys are tracked client-side so the
+ * server receives one `move` when the pressed direction changes and one
+ * `stop` (`onDirection(null)`) when all movement keys are released —
+ * movement no longer depends on OS key-repeat timing. Window blur also
+ * stops, so alt-tabbing never leaves a player running.
+ */
 export function useMovementKeys(
   spectator: boolean,
   sendInput: ArenaProps["sendInput"],
-  onDirection: (direction: string) => void,
+  onDirection: (direction: string | null) => void,
 ) {
   useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      const d: Record<string, string> = {
+    const held = new Map<string, string>();
+    const directionFor = (key: string): string | undefined =>
+      ({
         ArrowUp: "up",
         w: "up",
         ArrowDown: "down",
@@ -94,15 +106,90 @@ export function useMovementKeys(
         a: "left",
         ArrowRight: "right",
         d: "right",
-      };
-      const direction = d[e.key];
-      if (!direction) return;
-      if (spectator) return;
-      onDirection(direction);
+      })[key];
+
+    const emit = (): void => {
+      const directions = [...held.values()];
+      onDirection(directions.length > 0 ? directions[directions.length - 1] : null);
     };
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
+
+    const keydown = (e: KeyboardEvent) => {
+      const direction = directionFor(e.key);
+      if (!direction || spectator) return;
+      const previous = [...held.values()].at(-1);
+      held.set(e.key, direction);
+      const current = [...held.values()].at(-1);
+      if (current !== previous) onDirection(current ?? null);
+    };
+    const keyup = (e: KeyboardEvent) => {
+      if (!directionFor(e.key) || spectator) return;
+      if (!held.delete(e.key)) return;
+      emit();
+    };
+    const blur = () => {
+      if (held.size === 0) return;
+      held.clear();
+      emit();
+    };
+    window.addEventListener("keydown", keydown);
+    window.addEventListener("keyup", keyup);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", keydown);
+      window.removeEventListener("keyup", keyup);
+      window.removeEventListener("blur", blur);
+    };
   }, [spectator, sendInput, onDirection]);
+}
+
+/**
+ * Input sender that coalesces to the server's 50 ms per-socket input pace.
+ * A burst of intents (tap, quick direction change) always delivers the
+ * LATEST one after the throttle window instead of getting it rejected —
+ * otherwise a fast tap's `stop` would be dropped and the player would run
+ * on forever.
+ */
+export function useCoalescedInput(
+  sendInput: ArenaProps["sendInput"],
+): (payload: Record<string, unknown>) => void {
+  const lastSentAt = useRef(0);
+  const pending = useRef<Record<string, unknown> | null>(null);
+  const timer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  return (payload) => {
+    const send = () => {
+      lastSentAt.current = Date.now();
+      sendInput(payload);
+    };
+    const gap = Date.now() - lastSentAt.current;
+    if (gap >= INPUT_PACE_MS) {
+      if (timer.current !== null) {
+        window.clearTimeout(timer.current);
+        timer.current = null;
+      }
+      send();
+      return;
+    }
+    pending.current = payload;
+    if (timer.current === null) {
+      timer.current = window.setTimeout(() => {
+        timer.current = null;
+        if (pending.current) {
+          const queued = pending.current;
+          pending.current = null;
+          lastSentAt.current = Date.now();
+          sendInput(queued);
+        }
+      }, INPUT_PACE_MS - gap);
+    }
+  };
 }
 
 /**
@@ -134,12 +221,14 @@ function HoldButton({
   ariaLabel,
   repeat,
   onPress,
+  onRelease,
 }: {
   label: string;
   className: string;
   ariaLabel: string;
   repeat: boolean;
   onPress: () => void;
+  onRelease?: () => void;
 }) {
   const timer = useRef<number | null>(null);
   const stop = () => {
@@ -147,6 +236,7 @@ function HoldButton({
       window.clearInterval(timer.current);
       timer.current = null;
     }
+    onRelease?.();
   };
   const down = (e: ReactPointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
@@ -170,46 +260,38 @@ function HoldButton({
 
 /**
  * On-screen controls for touch devices (hidden on mouse pointers via CSS).
- * Direction buttons auto-repeat while held; the optional action button
+ * Direction buttons hold their direction while pressed (auto-repeat keeps
+ * the intent fresh) and stop on release; the optional action button
  * (e.g. dash) fires once per tap.
  */
 export function DPad({
   onDirection,
   action,
 }: {
-  onDirection: (d: string) => void;
+  onDirection: (d: string | null) => void;
   action?: { label: string; onPress: () => void };
 }) {
+  const direction = (d: string) => () => onDirection(d);
+  const release = () => onDirection(null);
+  const dirs: Array<[string, string]> = [
+    ["←", "left"],
+    ["↑", "up"],
+    ["↓", "down"],
+    ["→", "right"],
+  ];
   return (
     <div className="dpad" data-testid="dpad">
-      <HoldButton
-        label="←"
-        className="dpad-btn"
-        ariaLabel="move left"
-        repeat
-        onPress={() => onDirection("left")}
-      />
-      <HoldButton
-        label="↑"
-        className="dpad-btn"
-        ariaLabel="move up"
-        repeat
-        onPress={() => onDirection("up")}
-      />
-      <HoldButton
-        label="↓"
-        className="dpad-btn"
-        ariaLabel="move down"
-        repeat
-        onPress={() => onDirection("down")}
-      />
-      <HoldButton
-        label="→"
-        className="dpad-btn"
-        ariaLabel="move right"
-        repeat
-        onPress={() => onDirection("right")}
-      />
+      {dirs.map(([label, key]) => (
+        <HoldButton
+          key={key}
+          label={label}
+          className="dpad-btn"
+          ariaLabel={`move ${key}`}
+          repeat
+          onPress={direction(key)}
+          onRelease={release}
+        />
+      ))}
       {action && (
         <HoldButton
           label={action.label}

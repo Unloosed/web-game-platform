@@ -14,11 +14,15 @@ import {
 } from "../../../../packages/platform/src/index.js";
 import {
   gameIdSchema,
+  getGame,
   listGames,
 } from "../../../../packages/game-registry/src/index.js";
 import { persistMatchRecord } from "../completion.js";
 
 export async function roomRoutes(app: FastifyInstance): Promise<void> {
+  // Legacy default for rooms whose game id no longer resolves.
+  const DEFAULT_MAX_PLAYERS = 8;
+
   // Public catalog for the lobby's game selector; mirrors the server-side
   // registry so the web app never hard-codes game ids.
   app.get("/games", async () => ({ games: listGames() }));
@@ -78,13 +82,17 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const b = parsed.data;
+    // Player capacity is the hosting game's registry maximum (chess seats
+    // exactly two); the join route enforces it against the persisted row.
+    const maxPlayers =
+      getGame(b.gameId)?.metadata.maxPlayers ?? DEFAULT_MAX_PLAYERS;
     let r: any;
     for (let i = 0; i < 4 && !r; i++) {
       try {
         r = (
           await db.query(
-            'insert into rooms(code,name,game_id,is_private,host_user_id) values($1,$2,$3,$4,$5) returning id,code,name,game_id as "gameId",is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId"',
-            [newRoomCode(), b.name, b.gameId, b.isPrivate, u.id],
+            'insert into rooms(code,name,game_id,is_private,host_user_id,max_players) values($1,$2,$3,$4,$5,$6) returning id,code,name,game_id as "gameId",is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId"',
+            [newRoomCode(), b.name, b.gameId, b.isPrivate, u.id, maxPlayers],
           )
         ).rows[0];
       } catch {

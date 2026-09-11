@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import {
   DPad,
+  useCoalescedInput,
   useFitScale,
   useLatestSnap,
   useMovementKeys,
@@ -17,18 +18,24 @@ type RushView = {
     color: string;
     dashing: boolean;
   }>;
-  orbs: Array<{ id: string; x: number; y: number; color: string }>;
+  orbs: Array<{ id: string; x: number; y: number; color: string; star: boolean }>;
+  walls: Array<{ x: number; y: number; w: number; h: number }>;
 };
 
 export function ColorRushArena({ snap, spectator, sendInput }: ArenaProps) {
   const latest = useLatestSnap(snap);
-  const move = (direction: string) => {
+  const send = useCoalescedInput(sendInput);
+  const move = (direction: string | null) => {
     if (latest.current.phase !== "running") return;
-    sendInput({ type: "input", seq: Date.now(), op: "move", direction });
+    send(
+      direction === null
+        ? { type: "input", seq: Date.now(), op: "stop" }
+        : { type: "input", seq: Date.now(), op: "move", direction },
+    );
   };
   const dash = () => {
     if (spectator || latest.current.phase !== "running") return;
-    sendInput({ type: "input", seq: Date.now(), op: "dash" });
+    send({ type: "input", seq: Date.now(), op: "dash" });
   };
   useMovementKeys(spectator, sendInput, move);
   useEffect(() => {
@@ -39,8 +46,8 @@ export function ColorRushArena({ snap, spectator, sendInput }: ArenaProps) {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [spectator, sendInput, latest]);
-  const view = (snap.view ?? { players: [], orbs: [] }) as RushView;
+  });
+  const view = (snap.view ?? { players: [], orbs: [], walls: [] }) as RushView;
   const pos = useSmoothedPositions(view.players);
   const { ref, scale } = useFitScale(480);
   return (
@@ -58,10 +65,22 @@ export function ColorRushArena({ snap, spectator, sendInput }: ArenaProps) {
               "radial-gradient(ellipse at 50% 0%, #241636 0%, #0b1020 62%)",
           }}
         >
+          {view.walls.map((w, i) => (
+            <div
+              key={`wall-${i}`}
+              className="arena-wall"
+              style={{
+                left: w.x,
+                top: w.y,
+                width: w.w,
+                height: w.h,
+              }}
+            />
+          ))}
           {view.orbs.map((o) => (
             <div
               key={o.id}
-              className="orb"
+              className={"orb" + (o.star ? " orb-star" : "")}
               style={{
                 width: 20,
                 height: 20,
@@ -70,7 +89,9 @@ export function ColorRushArena({ snap, spectator, sendInput }: ArenaProps) {
                 background: o.color,
                 color: o.color,
               }}
-            />
+            >
+              {o.star ? "★" : ""}
+            </div>
           ))}
           {view.players.map((p) => (
             <div

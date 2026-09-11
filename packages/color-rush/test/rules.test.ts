@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   ARENA,
   COLLECT_DISTANCE,
+  ORB_RESPAWN_MS,
+  PLAYER_RADIUS,
+  SPEED,
+  WALLS,
   addPlayer,
   canStartMatch,
   colorRushGame,
@@ -29,8 +33,32 @@ describe("color rush rules", () => {
     expect(move(idle, "a", "right", 1).players.a.x).toBe(idle.players.a.x);
 
     let s = running();
+    s.players.a.x = ARENA - 20;
     s = move(s, "a", "right", 100);
-    expect(s.players.a.x).toBe(ARENA - 12);
+    expect(s.players.a.x).toBe(ARENA - PLAYER_RADIUS);
+  });
+
+  it("moves from held direction during tick, and stop clears it", () => {
+    const apply = colorRushGame.applyInput;
+    let s = running();
+    const startX = s.players.a.x;
+    s = apply(s, "a", { type: "input", seq: 1, op: "move", direction: "right" }, 0.05);
+    const afterMove = tick(s, 0.1);
+    expect(afterMove.players.a.x).toBeCloseTo(startX + SPEED * 0.1, 5);
+
+    const stopped = apply(afterMove, "a", { type: "input", seq: 2, op: "stop" }, 0.05);
+    const afterStop = tick(stopped, 0.1);
+    expect(afterStop.players.a.x).toBe(afterMove.players.a.x);
+  });
+
+  it("blocks movement with walls (center block stops an upward run)", () => {
+    let s = running();
+    // Just below the center block {x:210..270, y:150..210}.
+    s.players.a.x = 240;
+    s.players.a.y = 240;
+    s = move(s, "a", "up", 0.2);
+    expect(s.players.a.y).toBe(210 + PLAYER_RADIUS);
+    expect(s.players.a.x).toBe(240);
   });
 
   it("multiplies movement speed while a dash boost is active", () => {
@@ -47,7 +75,7 @@ describe("color rush rules", () => {
     // Let part of the boost and cooldown elapse.
     s = tick(s, 0.1);
     const boosted = s.players.a.dashMs;
-    expect(boosted).toBeLessThan(500);
+    expect(boosted).toBeLessThan(450);
     // A rejected dash would reset the boost to full; it must stay elapsed.
     s = dash(s, "a");
     expect(s.players.a.dashMs).toBe(boosted);
@@ -55,9 +83,8 @@ describe("color rush rules", () => {
 
   it("collects an orb on proximity during tick and awards once", () => {
     let s = running();
-    s = move(s, "a", "right", (80 - 60) / 150);
-    s.players.a.x = 80;
-    s.players.a.y = 140;
+    s.players.a.x = 40;
+    s.players.a.y = 40; // orb-0 spawns here
     s = tick(s, 0.05);
     expect(s.players.a.score).toBe(1);
     expect(s.orbs["orb-0"].collected).toBe(true);
@@ -65,6 +92,52 @@ describe("color rush rules", () => {
     // Staying on the spot must not score the same orb twice.
     s = tick(s, 0.05);
     expect(s.players.a.score).toBe(1);
+  });
+
+  it("respawns collected orbs after a delay, keeping the arena stocked", () => {
+    let s = running();
+    s.players.a.x = 40;
+    s.players.a.y = 40;
+    s = tick(s, 0.05);
+    expect(view(s).orbs.length).toBe(7);
+
+    // Once the respawn timer elapses, a fresh orb appears elsewhere.
+    s = tick(s, (ORB_RESPAWN_MS + 100) / 1000);
+    const orbs = view(s).orbs;
+    expect(orbs.length).toBe(8);
+    expect(orbs.some((o) => o.id === "orb-0")).toBe(false);
+    // The respawn never lands on top of a live orb.
+    for (const orb of orbs) {
+      for (const other of orbs) {
+        if (orb.id === other.id) continue;
+        expect(Math.hypot(orb.x - other.x, orb.y - other.y)).toBeGreaterThan(50);
+      }
+    }
+  });
+
+  it("makes every third respawn a star orb worth three points", () => {
+    const orbSpots = [
+      [40, 40],
+      [240, 40],
+      [440, 40],
+    ];
+    let s = running();
+    for (const [x, y] of orbSpots) {
+      s.players.a.x = x;
+      s.players.a.y = y;
+      s = tick(s, 0.05); // collect
+      s = tick(s, (ORB_RESPAWN_MS + 100) / 1000); // respawn
+    }
+    const stars = view(s).orbs.filter((o) => o.star);
+    expect(stars.length).toBe(1);
+
+    // Walk onto the star orb: it scores three.
+    const star = stars[0];
+    s.players.a.x = star.x;
+    s.players.a.y = star.y;
+    const before = s.players.a.score;
+    s = tick(s, 0.05);
+    expect(s.players.a.score).toBe(before + 3);
   });
 
   it("does not collect when nobody is within collection distance", () => {
@@ -81,8 +154,8 @@ describe("color rush rules", () => {
     s = dash(s, "a");
     expect(s.players.a).toEqual(frozen);
 
-    s.players.a.x = 80;
-    s.players.a.y = 140;
+    s.players.a.x = 40;
+    s.players.a.y = 40;
     s = tick(s, 0.05);
     expect(s.players.a.score).toBe(0);
   });
@@ -119,13 +192,14 @@ describe("color rush rules", () => {
 
   it("exposes generic roster rows and a filtered game view", () => {
     let s = running();
-    s.players.a.x = 80;
-    s.players.a.y = 140;
+    s.players.a.x = 40;
+    s.players.a.y = 40;
     s = tick(s, 0.05);
     expect(roster(s).map((p) => p.score)).toEqual([1, 0]);
     const v = view(s);
     expect(v.players.some((p) => p.dashing)).toBe(false);
     expect(v.orbs.length).toBe(7);
+    expect(v.walls.length).toBe(WALLS.length);
   });
 
   it("rejects payloads that are not color-rush inputs", () => {
@@ -134,12 +208,37 @@ describe("color rush rules", () => {
         .success,
     ).toBe(true);
     expect(
+      colorRushGame.inputSchema.safeParse({
+        type: "input",
+        seq: 0,
+        op: "move",
+        direction: "up",
+      }).success,
+    ).toBe(true);
+    expect(
+      colorRushGame.inputSchema.safeParse({ type: "input", seq: 0, op: "stop" })
+        .success,
+    ).toBe(true);
+    expect(
       colorRushGame.inputSchema.safeParse({ type: "input", seq: 0, direction: "up" })
         .success,
     ).toBe(false);
     expect(
-      colorRushGame.inputSchema.safeParse({ type: "input", seq: 0, op: "collect", orbId: "orb-0" })
-        .success,
+      colorRushGame.inputSchema.safeParse({
+        type: "input",
+        seq: 0,
+        op: "collect",
+        orbId: "orb-0",
+      }).success,
+    ).toBe(false);
+    expect(
+      colorRushGame.inputSchema.safeParse({
+        type: "input",
+        seq: 0,
+        op: "move",
+        direction: "up",
+        cheat: 1,
+      }).success,
     ).toBe(false);
   });
 
@@ -150,7 +249,12 @@ describe("color rush rules", () => {
     expect(s.phase).toBe("completed");
     const frozen = s;
     s = colorRushGame.applyInput(s, "a", { type: "input", seq: 1, op: "dash" }, 1);
-    s = colorRushGame.applyInput(s, "a", { type: "input", seq: 2, op: "move", direction: "right" }, 1);
+    s = colorRushGame.applyInput(
+      s,
+      "a",
+      { type: "input", seq: 2, op: "move", direction: "right" },
+      1,
+    );
     expect(s).toEqual(frozen);
   });
 

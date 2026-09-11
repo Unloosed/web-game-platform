@@ -562,6 +562,111 @@ describe("RoomManager", () => {
     manager.dispose();
   });
 
+  it("hosts chess and persists completion on an input-driven checkmate", () => {
+    const { manager, api } = createManager();
+
+    for (const userId of [HOST_ID, PLAYER_ID]) {
+      manager.connect(
+        ROOM_CODE,
+        {
+          userId,
+          displayName: userId,
+          spectator: false,
+          host: userId === HOST_ID,
+          socketId: `${userId}-socket`,
+        },
+        "chess",
+      );
+    }
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+
+    // Fool's mate: the host (White) is mated in four moves.
+    const move = (userId: string, from: string, to: string) =>
+      manager.input(ROOM_CODE, userId, {
+        type: "input",
+        seq: 1,
+        op: "move",
+        from,
+        to,
+      });
+    expect(move(HOST_ID, "f2", "f3")).not.toBeNull();
+    expect(move(PLAYER_ID, "e7", "e5")).not.toBeNull();
+    expect(move(HOST_ID, "g2", "g4")).not.toBeNull();
+    expect(move(PLAYER_ID, "d8", "h4")).not.toBeNull();
+
+    const snapshot = manager.getSnapshot(ROOM_CODE);
+    expect(snapshot?.phase).toBe("completed");
+    expect(snapshot?.results?.map((r) => [r.id, r.score])).toEqual([
+      [PLAYER_ID, 2],
+      [HOST_ID, 0],
+    ]);
+
+    // Completion through an input (not a tick) must still persist once.
+    expect(api.persistCompletion).toHaveBeenCalledTimes(1);
+    expect(api.persistCompletion).toHaveBeenCalledWith(ROOM_CODE, {
+      winnerUserId: PLAYER_ID,
+      results: expect.arrayContaining([
+        expect.objectContaining({ userId: PLAYER_ID, score: 2 }),
+        expect.objectContaining({ userId: HOST_ID, score: 0 }),
+      ]),
+    });
+
+    manager.dispose();
+  });
+
+  it("records no winner when a chess match ends in a draw", () => {
+    const { manager, api } = createManager();
+
+    for (const userId of [HOST_ID, PLAYER_ID]) {
+      manager.connect(
+        ROOM_CODE,
+        {
+          userId,
+          displayName: userId,
+          spectator: false,
+          host: userId === HOST_ID,
+          socketId: `${userId}-socket`,
+        },
+        "chess",
+      );
+    }
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+
+    // Threefold repetition through knight shuffles ends in a draw.
+    const shuffles = [
+      [HOST_ID, "g1", "f3"],
+      [PLAYER_ID, "g8", "f6"],
+      [HOST_ID, "f3", "g1"],
+      [PLAYER_ID, "f6", "g8"],
+    ];
+    for (let round = 0; round < 2; round++) {
+      for (const [userId, from, to] of shuffles) {
+        expect(
+          manager.input(ROOM_CODE, userId, {
+            type: "input",
+            seq: 1,
+            op: "move",
+            from,
+            to,
+          }),
+        ).not.toBeNull();
+      }
+    }
+
+    expect(manager.getSnapshot(ROOM_CODE)?.phase).toBe("completed");
+    expect(api.persistCompletion).toHaveBeenCalledWith(ROOM_CODE, {
+      winnerUserId: null,
+      results: expect.arrayContaining([
+        expect.objectContaining({ score: 1 }),
+        expect.objectContaining({ score: 1 }),
+      ]),
+    });
+
+    manager.dispose();
+  });
+
   it("rejects inputs that fail the room's game schema without mutating state", () => {
     const { manager } = createManager();
     connectHost(manager);

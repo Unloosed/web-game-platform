@@ -158,12 +158,16 @@ export class RoomManager {
     const parsed = room.game.inputSchema.safeParse(raw);
     if (!parsed.success) return null;
 
+    const previousPhase = room.state.phase;
     room.state = room.game.applyInput(
       room.state,
       userId,
       parsed.data,
       this.tickMs / 1000,
     );
+    // Turn-based games can complete through an input (a chess mate or
+    // resignation), not only inside a tick; completion must persist then too.
+    this.persistCompletionOnTransition(roomCode, previousPhase, room.state);
     return this.broadcast(roomCode);
   }
 
@@ -357,27 +361,7 @@ export class RoomManager {
         const previousPhase = current.state.phase;
         current.state = current.game.tick(current.state, this.tickMs / 1000);
 
-        if (
-          previousPhase !== "completed" &&
-          current.state.phase === "completed"
-        ) {
-          const finalResults = current.game.getResults(current.state);
-
-          void this.options.api
-            .persistCompletion(roomCode, {
-              winnerUserId: finalResults[0]?.id ?? null,
-              results: finalResults.map((row) => ({
-                userId: row.id,
-                score: row.score,
-              })),
-            })
-            .catch((error) => {
-              this.options.onLifecycleFailure?.(
-                "persist_match_completion",
-                error,
-              );
-            });
-        }
+        this.persistCompletionOnTransition(roomCode, previousPhase, current.state);
 
         this.broadcast(roomCode);
         this.options.onTickSample?.(performance.now() - tickStart);
@@ -386,6 +370,41 @@ export class RoomManager {
 
     this.rooms.set(roomCode, room);
     return room;
+  }
+
+  /**
+   * Writes the durable match record exactly once, at the waiting/running →
+   * completed transition, from whichever driver (tick or input) caused it.
+   * The winner is the top score only when it is strictly ahead of the
+   * runner-up — a tied top score is a draw and records no winner.
+   */
+  private persistCompletionOnTransition(
+    roomCode: string,
+    previousPhase: RoomPhase,
+    state: AnyGameState,
+  ): void {
+    if (previousPhase === "completed" || state.phase !== "completed") {
+      return;
+    }
+    const finalResults = this.rooms.get(roomCode)?.game.getResults(state) ?? [];
+    const winnerUserId =
+      finalResults.length > 0 &&
+      (finalResults.length === 1 ||
+        finalResults[0].score > finalResults[1].score)
+        ? finalResults[0].id
+        : null;
+
+    void this.options.api
+      .persistCompletion(roomCode, {
+        winnerUserId,
+        results: finalResults.map((row) => ({
+          userId: row.id,
+          score: row.score,
+        })),
+      })
+      .catch((error) => {
+        this.options.onLifecycleFailure?.("persist_match_completion", error);
+      });
   }
 
   private resetForMatch(roomCode: string, room: RoomInstance): void {

@@ -369,7 +369,12 @@ export function RoomView({
         <div className="room-grid">
           <div className="arena-stage" aria-label="arena" data-game={room.gameId}>
             <div className="arena-frame">
-              <Arena snap={snap} spectator={spectator} sendInput={sendInput} />
+              <Arena
+                snap={snap}
+                spectator={spectator}
+                userId={user.id}
+                sendInput={sendInput}
+              />
               {!connected && wasConnected && !connErr && (
                 <div className="reconnect-overlay" data-testid="reconnect-banner" role="status">
                   Connection lost — reconnecting…

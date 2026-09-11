@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clientEventSchema, directionSchema, tagInputSchema } from "../src/index.js";
+import { clientEventSchema, directionSchema } from "../src/index.js";
 
 describe("protocol", () => {
   it("rejects oversized chat", () =>
@@ -21,9 +21,8 @@ describe("protocol", () => {
     expect(
       clientEventSchema.safeParse({ type: "ready", ready: true }).success,
     ).toBe(true));
-  it("validates the tag game payload strictly", () => {
-    expect(tagInputSchema.safeParse({ type: "input", seq: 1, direction: "left" }).success).toBe(true);
-    expect(tagInputSchema.safeParse({ type: "input", seq: 1, direction: "none" }).success).toBe(false);
+  it("validates the direction enum", () => {
     expect(directionSchema.safeParse("up").success).toBe(true);
+    expect(directionSchema.safeParse("none").success).toBe(false);
   });
 });

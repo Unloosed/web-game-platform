@@ -11,6 +11,7 @@ describe("game registry", () => {
   it("hosts at least the reference game and the second reference game", () => {
     expect(DEFAULT_GAME_ID).toBe("sample-tag");
     expect(Object.keys(gameRegistry).sort()).toEqual([
+      "chess",
       "color-rush",
       "sample-tag",
     ]);
@@ -19,23 +20,31 @@ describe("game registry", () => {
   it("resolves definitions by id and returns null for unknown ids", () => {
     expect(getGame("sample-tag")?.metadata.id).toBe("sample-tag");
     expect(getGame("color-rush")?.metadata.id).toBe("color-rush");
+    expect(getGame("chess")?.metadata.id).toBe("chess");
     expect(getGame("does-not-exist")).toBeNull();
   });
 
   it("validates untrusted ids at the boundary", () => {
     expect(gameIdSchema.safeParse("sample-tag").success).toBe(true);
+    expect(gameIdSchema.safeParse("chess").success).toBe(true);
     expect(gameIdSchema.safeParse("nope").success).toBe(false);
     expect(gameIdSchema.safeParse(42).success).toBe(false);
   });
 
   it("lists metadata for the lobby without leaking definitions", () => {
     const games = listGames();
-    expect(games.map((g) => g.id).sort()).toEqual(["color-rush", "sample-tag"]);
+    expect(games.map((g) => g.id).sort()).toEqual([
+      "chess",
+      "color-rush",
+      "sample-tag",
+    ]);
     for (const g of games) {
       expect(g.minPlayers).toBeGreaterThanOrEqual(2);
       expect(g.maxPlayers).toBeGreaterThanOrEqual(g.minPlayers);
       expect(g.name.length).toBeGreaterThan(0);
     }
+    // Chess seats exactly two players.
+    expect(getGame("chess")?.metadata.maxPlayers).toBe(2);
   });
 
   it("keeps game ids unique across the registry", () => {
