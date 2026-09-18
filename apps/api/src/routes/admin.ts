@@ -61,7 +61,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     requireRole(u, "admin", reply);
-    const targetId = (req.params as any).id;
+    const targetId = (req.params as { id: string }).id;
     const b = z.object({ role: z.enum(["player", "moderator", "admin"]) }).parse(req.body);
     const q = await db.query(
       "update users set role=$2 where id=$1 returning id",
@@ -80,7 +80,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     requireRole(u, "moderator", reply);
-    const targetId = (req.params as any).id;
+    const targetId = (req.params as { id: string }).id;
     const b = z.object({ hours: z.number().min(0).max(24 * 365) }).parse(req.body);
     const until = b.hours === 0 ? null : new Date(Date.now() + b.hours * 3_600_000);
     const q = await db.query(
@@ -108,7 +108,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     requireRole(u, "moderator", reply);
-    const targetId = (req.params as any).id;
+    const targetId = (req.params as { id: string }).id;
     const b = z.object({ minutes: z.number().min(0).max(24 * 60) }).parse(req.body);
     const until =
       b.minutes === 0 ? null : new Date(Date.now() + b.minutes * 60_000);
@@ -161,7 +161,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     requireRole(u, "moderator", reply);
-    const code = (req.params as any).code;
+    const code = (req.params as { code: string }).code;
     const b = z.object({ userId: z.string().uuid() }).parse(req.body);
     const q = await db.query(
       `
@@ -190,7 +190,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     requireRole(u, "moderator", reply);
-    const code = (req.params as any).code;
+    const code = (req.params as { code: string }).code;
     const q = await db.query<{ id: string }>(
       "update rooms set status='archived',updated_at=now() where code=$1 returning id",
       [code],
@@ -245,7 +245,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const u = await required(req, reply);
     if (!u) return;
     requireRole(u, "moderator", reply);
-    const id = (req.params as any).id;
+    const id = (req.params as { id: string }).id;
     const b = z
       .object({ status: z.enum(["resolved", "dismissed"]) })
       .parse(req.body);

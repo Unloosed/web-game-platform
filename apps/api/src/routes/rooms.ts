@@ -86,11 +86,21 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     // exactly two); the join route enforces it against the persisted row.
     const maxPlayers =
       getGame(b.gameId)?.metadata.maxPlayers ?? DEFAULT_MAX_PLAYERS;
-    let r: any;
+    type RoomRow = {
+      id: string;
+      code: string;
+      name: string;
+      gameId: string;
+      isPrivate: boolean;
+      status: string;
+      maxPlayers: number;
+      hostUserId: string;
+    };
+    let r: RoomRow | undefined;
     for (let i = 0; i < 4 && !r; i++) {
       try {
         r = (
-          await db.query(
+          await db.query<RoomRow>(
             'insert into rooms(code,name,game_id,is_private,host_user_id,max_players) values($1,$2,$3,$4,$5,$6) returning id,code,name,game_id as "gameId",is_private as "isPrivate",status,max_players as "maxPlayers",host_user_id as "hostUserId"',
             [newRoomCode(), b.name, b.gameId, b.isPrivate, u.id, maxPlayers],
           )
@@ -174,7 +184,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
   app.get("/rooms/:code", async (req, reply) => {
     const u = await required(req, reply);
     if (!u) return;
-    const code = (req.params as any).code;
+    const code = (req.params as { code: string }).code;
     const q = await db.query(
       'select r.id,r.code,r.name,r.game_id as "gameId",r.status,r.is_private as "isPrivate",r.max_players as "maxPlayers",r.host_user_id as "hostUserId",m.role from rooms r join room_members m on m.room_id=r.id where r.code=$1 and m.user_id=$2',
       [code, u.id],
@@ -189,12 +199,12 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
   app.post("/rooms/:code/start", async (req, reply) => {
     const u = await required(req, reply);
     if (!u) return;
-    const c = (req.params as any).code;
+    const c = (req.params as { code: string }).code;
     // Host-only, and only a fresh waiting room may transition to running:
     // archived rooms stay closed, and rematches go through the realtime
     // restart_match gate.
-    const q = await db.query<{ id: string; status: string }>(
-      "select r.id, r.status from rooms r join room_members m on r.id=m.room_id where r.code=$1 and m.user_id=$2 and m.role='host'",
+    const q = await db.query<{ id: string; status: string; gameId: string }>(
+      "select r.id, r.status, r.game_id as \"gameId\" from rooms r join room_members m on r.id=m.room_id where r.code=$1 and m.user_id=$2 and m.role='host'",
       [c, u.id],
     );
     if (!q.rows[0]) {
@@ -205,8 +215,9 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       reply.code(409);
       return { error: "room_not_startable" };
     }
-    // Mirror the game-server startup gate: enough participants and
-    // every non-spectator member explicitly ready.
+    // Mirror the game-server startup gate: the hosting game's minimum
+    // participant count and every non-spectator member explicitly ready.
+    const minPlayers = getGame(q.rows[0].gameId)?.metadata.minPlayers ?? 2;
     const readiness = await db.query<{
       participants: number;
       unready: number;
@@ -218,7 +229,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       [q.rows[0].id],
     );
     const { participants, unready } = readiness.rows[0];
-    if (participants < 2) {
+    if (participants < minPlayers) {
       reply.code(409);
       return { error: "insufficient_players" };
     }
@@ -235,7 +246,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
   app.post("/rooms/:code/complete", async (req, reply) => {
     const u = await required(req, reply);
     if (!u) return;
-    const c = (req.params as any).code;
+    const c = (req.params as { code: string }).code;
     const b = z
       .object({
         results: z.array(
@@ -282,7 +293,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
     if (!(await enforceRateLimit(req, reply, "chat", u.id, 20, 60_000)))
       return;
 
-    const c = (req.params as any).code;
+    const c = (req.params as { code: string }).code;
 
     const parsed = z
       .object({
@@ -343,7 +354,7 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
   app.get("/rooms/:code/chat", async (req, reply) => {
     const u = await required(req, reply);
     if (!u) return;
-    const c = (req.params as any).code;
+    const c = (req.params as { code: string }).code;
 
     const membership = await db.query(
       `
@@ -362,19 +373,25 @@ export async function roomRoutes(app: FastifyInstance): Promise<void> {
       return { error: "not_member" };
     }
 
+    // Newest 100 messages, presented in chronological order — ordering
+    // ascending before limiting would freeze the view on the oldest 100
+    // once the room's history outgrows the page size.
     const history = await db.query(
       `
-      select
-        cm.id,
-        u.display_name as "from",
-        cm.content as text,
-        (extract(epoch from cm.created_at) * 1000)::double precision as at
-      from chat_messages cm
-      join rooms r on r.id = cm.room_id
-      join users u on u.id = cm.user_id
-      where r.code = $1
-      order by cm.created_at asc
-      limit 100
+      select * from (
+        select
+          cm.id,
+          u.display_name as "from",
+          cm.content as text,
+          (extract(epoch from cm.created_at) * 1000)::double precision as at
+        from chat_messages cm
+        join rooms r on r.id = cm.room_id
+        join users u on u.id = cm.user_id
+        where r.code = $1
+        order by cm.created_at desc
+        limit 100
+      ) newest
+      order by "at" asc
     `,
       [c],
     );

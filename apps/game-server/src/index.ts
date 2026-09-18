@@ -369,6 +369,8 @@ type VerifiedIdentity = {
   spectator: boolean;
   host: boolean;
   muted: boolean;
+  /** Durable membership readiness, restored into the live session. */
+  ready: boolean;
   /** Persisted room game id; the room's definition resolves from it. */
   gameId: string;
 };
@@ -459,6 +461,9 @@ io.on("connection", (socket) => {
         spectator,
         host,
         socketId: socket.id,
+        // Readiness is restored from durable membership so a player who
+        // rejoins (including after grace expiry) does not have to re-ready.
+        ready: identity.ready,
       },
       identity.gameId,
     );

@@ -380,3 +380,8 @@ Prove that a second game can be added without modifying platform internals, and 
 2. New games enter through `packages/game-registry` and the web `gameViews` registry only; the guide's checklist is the acceptance bar.
 3. Per-game leaderboard dimensions shipped with Milestone 5 (`rooms.game_id`); season/rule-scoped variants can build on the same key if demand appears.
 4. If horizontal scaling arrives, introduce the OpenTelemetry trace SDK alongside a collector so room-routing failures can be traced.
+
+# Post-roadmap additions
+
+- **Chess (`packages/chess`, third registered game)** — a turn-based game with clocks, full rules (checkmate, stalemate, resignation, fifty-move, threefold repetition, insufficient material, clock-flag adjudication), and input-driven completion, added strictly through the Milestone 5 plugin seam (one registry entry + one client `gameViews` entry) with no platform changes. It proves the seam carries asymmetric, input-completed games alongside realtime simulation games.
+- **Full-repo repair pass** — restored the Milestone 3.1 contract that a reconnecting player's readiness is restored from handshake verification (the game server now forwards the verified `ready` flag from `POST /internal/socket/verify` into the live session); fixed `GET /rooms/:code/chat` returning the oldest 100 messages instead of the newest; hardened the Color Rush orb-respawn fallback against negative PRNG state; aligned the HTTP start gate with each game's registered `minPlayers`; and stopped broadcasting snapshots for idle (waiting/completed) rooms whose tick no longer mutates state.

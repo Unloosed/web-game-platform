@@ -359,11 +359,16 @@ export class RoomManager {
 
         const tickStart = performance.now();
         const previousPhase = current.state.phase;
+        const previousState = current.state;
         current.state = current.game.tick(current.state, this.tickMs / 1000);
 
         this.persistCompletionOnTransition(roomCode, previousPhase, current.state);
 
-        this.broadcast(roomCode);
+        // Games no-op their tick outside `running`; skip the 20 Hz broadcast
+        // for unchanged state so idle rooms cost no snapshot traffic.
+        if (current.state !== previousState) {
+          this.broadcast(roomCode);
+        }
         this.options.onTickSample?.(performance.now() - tickStart);
       }, this.tickMs),
     };

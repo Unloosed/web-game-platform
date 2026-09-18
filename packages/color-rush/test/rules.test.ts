@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { Orb } from "../src/index.js";
 import {
   ARENA,
   COLLECT_DISTANCE,
+  ORB_SPOTS,
   ORB_RESPAWN_MS,
   PLAYER_RADIUS,
   SPEED,
@@ -12,6 +14,7 @@ import {
   dash,
   initialState,
   move,
+  nextSpawnSpot,
   removePlayer,
   roster,
   setReady,
@@ -267,4 +270,26 @@ describe("color rush rules", () => {
       }
     }
   });
+
+  it("respawn fallback resolves a valid spot when the rng state is negative", () => {
+    // An orb parked on every candidate spot forces 32 failed attempts, so
+    // the deterministic fallback picks the spot from the (int32, possibly
+    // negative) rng state.
+    const blocked: Record<string, Orb> = {};
+    for (const [i, spot] of ORB_SPOTS.entries()) {
+      blocked[`orb-${i}`] = {
+        id: `orb-${i}`,
+        x: spot.x,
+        y: spot.y,
+        color: "#000000",
+        star: false,
+        collected: false,
+      };
+    }
+    for (const state of [-1, -12345, -2147483648, 987654321]) {
+      const result = nextSpawnSpot(state, blocked);
+      expect(ORB_SPOTS).toContainEqual({ x: result.x, y: result.y });
+    }
+  });
 });
+

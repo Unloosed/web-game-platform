@@ -356,7 +356,7 @@ function resolveAxis(
 
 /** Picks the next orb spawn from the candidate ring: advances the seeded
  * PRNG until a spot clears active orbs, so matches stay deterministic. */
-function nextSpawnSpot(
+export function nextSpawnSpot(
   rngState: number,
   orbs: Record<string, Orb>,
 ): { x: number; y: number; rngState: number } {
@@ -370,7 +370,12 @@ function nextSpawnSpot(
       .every((o) => Math.hypot(o.x - spot.x, o.y - spot.y) > 50);
     if (clearOfOrbs) return { x: spot.x, y: spot.y, rngState: state };
   }
-  const fallback = ORB_SPOTS[state % ORB_SPOTS.length];
+  // rngState is int32 and can be negative; normalize the modulo so the
+  // fallback index stays in range instead of reading `undefined`.
+  const fallback =
+    ORB_SPOTS[
+      ((state % ORB_SPOTS.length) + ORB_SPOTS.length) % ORB_SPOTS.length
+    ];
   return { x: fallback.x, y: fallback.y, rngState: state };
 }
 

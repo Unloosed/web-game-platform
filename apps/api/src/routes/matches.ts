@@ -4,7 +4,7 @@ import { gameIdSchema } from "../../../../packages/game-registry/src/index.js";
 
 export async function matchRoutes(app: FastifyInstance): Promise<void> {
   app.get("/users/:id/matches", async (req) => {
-    const userId = (req.params as any).id;
+    const userId = (req.params as { id: string }).id;
     const history = await db.query(
       `
       select
@@ -31,7 +31,7 @@ export async function matchRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/users/:id/achievements", async (req) => {
-    const userId = (req.params as any).id;
+    const userId = (req.params as { id: string }).id;
     const rows = await db.query(
       `
       select

@@ -6,6 +6,7 @@ Since Milestone 5 the platform hosts **multiple games** through a formal plugin 
 
 - `sample-tag` (Tag Arena) — the reference server-authoritative tag game.
 - `color-rush` (Color Rush) — orb-collection race with dash boosts, added with **zero changes** to platform internals.
+- `chess` (Chess) — turn-based chess with clocks, full rules (checkmate, stalemate, draws, resign), and input-driven completion, added through the same seam with **zero changes** to platform internals.
 
 Games register in `packages/game-registry` (server) and the `gameViews` map in `apps/web/src/games/registry.tsx` (client); rooms persist their game in `rooms.game_id`; the realtime server resolves each room's definition from that persisted id; the lobby's game selector, `GET /games`, and the per-game leaderboard (`GET /leaderboard?game=<gameId>`) are registry-driven, and every registered game is automatically run through the platform-contract conformance suite in `packages/game-registry/test/conformance.test.ts`. **To add a new game, follow `docs/web-game-platform-game-plugin-guide.md`** — it documents the `GameDefinition` contract, standards, testing requirements, and the author checklist.
 
@@ -38,7 +39,7 @@ pnpm test:e2e
 
 The E2E suites sign in ~25 users in quick succession and finish matches fast, so set `GAME_MATCH_MS=8000` and `LOGIN_RATE_LIMIT=100` in `.env` and restart `pnpm dev` first — the defaults (60 s matches, 10 logins per IP per 10 minutes) will fail the run.
 
-E2E suites: `tests/e2e/multiplayer.spec.ts` (ready-up/start/movement), `tests/e2e/color-rush.spec.ts` (second game end to end), `tests/e2e/api-lifecycle.spec.ts` (authorization, chat persistence, lifecycle persistence, achievements), and `tests/e2e/room-lifecycle.spec.ts` (match completion/results/rematch, reconnect within grace via a reused browser session, spectator view).
+E2E suites: `tests/e2e/multiplayer.spec.ts` (ready-up/start/movement), `tests/e2e/color-rush.spec.ts` (second game end to end), `tests/e2e/chess.spec.ts` (turn-based game end to end), `tests/e2e/api-lifecycle.spec.ts` (authorization, chat persistence, lifecycle persistence, achievements), and `tests/e2e/room-lifecycle.spec.ts` (match completion/results/rematch, reconnect within grace via a reused browser session, spectator view).
 
 ## Scope notes
 

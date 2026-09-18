@@ -699,4 +699,26 @@ describe("RoomManager", () => {
 
     manager.dispose();
   });
+
+  it("suppresses tick broadcasts while a room is idle, resumes while running", () => {
+    vi.useFakeTimers();
+
+    const { manager, broadcasts } = createManager();
+    connectHost(manager);
+    connectPlayer(manager);
+
+    // connect()/setReady() broadcast; after they settle, idle ticks in the
+    // waiting phase must not emit further snapshots.
+    const idleBroadcasts = broadcasts.length;
+    vi.advanceTimersByTime(1_000);
+    expect(broadcasts.length).toBe(idleBroadcasts);
+
+    readyUp(manager);
+    manager.startMatch(ROOM_CODE, HOST_ID);
+    const runningBroadcasts = broadcasts.length;
+    vi.advanceTimersByTime(1_000);
+    expect(broadcasts.length).toBeGreaterThan(runningBroadcasts);
+
+    manager.dispose();
+  });
 });
